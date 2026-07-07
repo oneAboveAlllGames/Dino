@@ -215,6 +215,10 @@ function draw(
   }
 }
 
+// Original knight-bug character (not based on any copyrighted design):
+// a small hollow-eyed insect-knight in a cloak, with distinct silhouettes
+// for standing, jumping, ducking, and stumbling. Drawn entirely with canvas
+// primitives — no image assets needed.
 function drawDino(
   ctx: CanvasRenderingContext2D,
   x: number,
@@ -224,19 +228,103 @@ function drawDino(
   isStumbling: boolean,
   isBoosted: boolean,
   config: typeof DEFAULT_CONFIG,
-  color: string
+  tint: string
 ) {
-  const h = isDucking ? config.duckHeight : config.dinoHeight;
   const w = config.dinoWidth;
-  const top = groundY + y - h;
+  const bodyColor = isStumbling ? "#8a3a3a" : tint;
+  const cloakColor = isStumbling ? "#5c2626" : shade(tint, -25);
+  const eyeColor = "#f5c84c";
 
-  ctx.fillStyle = isStumbling ? "#cc3333" : color;
-  ctx.fillRect(x, top, w, h);
+  ctx.save();
+
+  if (isDucking) {
+    // --- Duck pose: low, elongated, horns swept back ---
+    const cx = x + w / 2;
+    const baseY = groundY + y;
+    const bodyTop = baseY - config.duckHeight;
+
+    ctx.fillStyle = cloakColor;
+    ctx.beginPath();
+    ctx.moveTo(x + 2, baseY);
+    ctx.quadraticCurveTo(x - 6, bodyTop + 6, x + 10, bodyTop);
+    ctx.lineTo(x + w - 10, bodyTop);
+    ctx.quadraticCurveTo(x + w + 6, bodyTop + 6, x + w - 2, baseY);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.fillStyle = bodyColor;
+    ctx.beginPath();
+    ctx.ellipse(cx, bodyTop + 6, w / 2 - 4, 9, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    drawHorn(ctx, cx - 10, bodyTop, -18, -4, cloakColor);
+    drawHorn(ctx, cx + 10, bodyTop, 18, -4, cloakColor);
+
+    ctx.fillStyle = eyeColor;
+    ctx.beginPath();
+    ctx.ellipse(cx - 6, bodyTop + 6, 3, 4, 0, 0, Math.PI * 2);
+    ctx.ellipse(cx + 6, bodyTop + 6, 3, 4, 0, 0, Math.PI * 2);
+    ctx.fill();
+  } else {
+    // --- Stand / jump pose: upright cloaked figure ---
+    const h = config.dinoHeight;
+    const cx = x + w / 2;
+    const baseY = groundY + y;
+    const bodyTop = baseY - h;
+    const headCy = bodyTop + h * 0.35;
+    const bodyRy = h * 0.4;
+
+    const flare = y < 0 ? 6 : 0;
+    ctx.fillStyle = cloakColor;
+    ctx.beginPath();
+    ctx.moveTo(cx - w / 2 + 6, baseY);
+    ctx.quadraticCurveTo(cx - w / 2 - flare, headCy + bodyRy * 0.6, cx - w * 0.3, headCy);
+    ctx.lineTo(cx + w * 0.3, headCy);
+    ctx.quadraticCurveTo(cx + w / 2 + flare, headCy + bodyRy * 0.6, cx + w / 2 - 6, baseY);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.fillStyle = bodyColor;
+    ctx.beginPath();
+    ctx.ellipse(cx, headCy, w * 0.34, bodyRy * 0.75, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    drawHorn(ctx, cx - w * 0.2, headCy - bodyRy * 0.5, -10, -16, cloakColor);
+    drawHorn(ctx, cx + w * 0.2, headCy - bodyRy * 0.5, 10, -16, cloakColor);
+
+    ctx.fillStyle = eyeColor;
+    ctx.beginPath();
+    ctx.ellipse(cx - w * 0.11, headCy - 1, 4, 5.5, 0, 0, Math.PI * 2);
+    ctx.ellipse(cx + w * 0.11, headCy - 1, 4, 5.5, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    if (y >= -0.5) {
+      ctx.strokeStyle = cloakColor;
+      ctx.lineWidth = 3;
+      ctx.lineCap = "round";
+      ctx.beginPath();
+      ctx.moveTo(cx - w * 0.22, baseY - 2);
+      ctx.lineTo(cx - w * 0.3, baseY + 6);
+      ctx.moveTo(cx + w * 0.22, baseY - 2);
+      ctx.lineTo(cx + w * 0.3, baseY + 6);
+      ctx.stroke();
+    }
+  }
+
+  if (isStumbling) {
+    ctx.fillStyle = "#cc3333";
+    ctx.font = "bold 16px sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText("!", x + w / 2, groundY + y - config.dinoHeight - 10);
+    ctx.textAlign = "start";
+  }
+
+  ctx.restore();
 
   if (isBoosted) {
-    // simple speed-lines behind the dino
     ctx.strokeStyle = "#ffb300";
     ctx.lineWidth = 2;
+    const top = groundY + y - (isDucking ? config.duckHeight : config.dinoHeight);
     for (let i = 0; i < 3; i++) {
       ctx.beginPath();
       ctx.moveTo(x - 10 - i * 8, top + 10 + i * 10);
@@ -244,4 +332,32 @@ function drawDino(
       ctx.stroke();
     }
   }
+}
+
+function drawHorn(
+  ctx: CanvasRenderingContext2D,
+  baseX: number,
+  baseY: number,
+  dx: number,
+  dy: number,
+  color: string
+) {
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  ctx.moveTo(baseX - 3, baseY);
+  ctx.lineTo(baseX + dx, baseY + dy);
+  ctx.lineTo(baseX + 3, baseY);
+  ctx.closePath();
+  ctx.fill();
+}
+
+// Darkens/lightens a hex color by `percent` (-100 to 100), used to derive
+// the cloak shade from the main tint color.
+function shade(hex: string, percent: number): string {
+  const num = parseInt(hex.replace("#", ""), 16);
+  const amt = Math.round(2.55 * percent);
+  const r = Math.max(0, Math.min(255, (num >> 16) + amt));
+  const g = Math.max(0, Math.min(255, ((num >> 8) & 0x00ff) + amt));
+  const b = Math.max(0, Math.min(255, (num & 0x0000ff) + amt));
+  return `#${((1 << 24) + (r << 16) + (g << 8) + b).toString(16).slice(1)}`;
 }
