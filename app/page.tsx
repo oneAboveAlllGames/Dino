@@ -1,18 +1,12 @@
-"use client";
+import Link from "next/link";
 
-// app/play/page.tsx
-//
-// Solo test harness — just proves out the engine + rendering before we add
-// the Supabase Realtime layer on top. Space/Up = jump, Down = duck.
-
-import DinoCanvas from "../../components/DinoCanvas";
-
-export default function PlayPage() {
+export default function Home() {
   return (
     <main style={{ padding: 24, fontFamily: "system-ui" }}>
-      <h1>Dino Engine Test</h1>
-      <p>Space / ↑ to jump, ↓ to duck. Hitting an obstacle stumbles you for 2s (no death). Orange dots are speed boosts.</p>
-      <DinoCanvas seed={42} distanceGoal={5000} onFinish={() => alert("Finish line!")} />
+      <h1>Dino Multiplayer</h1>
+      <p>
+        <Link href="/play">Go to the solo test page →</Link>
+      </p>
     </main>
   );
 }
