@@ -488,8 +488,8 @@ function drawFlame(
 
   ctx.restore();
 }
+function drawHorn(
   ctx: CanvasRenderingContext2D,
-  baseX: number,
   baseY: number,
   dx: number,
   dy: number,
