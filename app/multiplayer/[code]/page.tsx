@@ -42,6 +42,7 @@ export default function RacePage() {
   const [opponentResult, setOpponentResult] = useState<number | null>(null);
   const [opponentPresent, setOpponentPresent] = useState(false);
   const [raceStartAt, setRaceStartAt] = useState<number | null>(null);
+  const remoteStateRef = useRef<RemotePlayerState | null>(null);
 
   const playerIdRef = useRef<string>("");
   const playerNameRef = useRef<string>("Player");
@@ -97,10 +98,12 @@ export default function RacePage() {
       .on("broadcast", { event: "state" }, ({ payload }) => {
         if (payload.playerId !== playerIdRef.current) {
           setRemoteState(payload as RemotePlayerState);
+          remoteStateRef.current = payload as RemotePlayerState;
         }
       })
       .on("broadcast", { event: "finish" }, ({ payload }) => {
         if (payload.playerId !== playerIdRef.current) {
+          // Authoritative — always overwrite our estimate with the real value.
           setOpponentResult(payload.distance);
         }
       })
@@ -144,6 +147,15 @@ export default function RacePage() {
   const handleFinish = (finalDistance: number) => {
     setMyResult(finalDistance);
 
+    // Show a result the instant OUR timer ends, rather than waiting on the
+    // opponent's own finish message — since both clients share the same
+    // raceStartAt/durationMs, their timer ends at essentially the same
+    // moment as ours, so their last-known distance (from the ~10x/sec state
+    // broadcasts) is already a very close estimate of their final score.
+    // If their actual "finish" broadcast arrives a moment later with a more
+    // precise number, the listener above overwrites this estimate.
+    setOpponentResult((prev) => prev ?? remoteStateRef.current?.distance ?? 0);
+
     const sendFinish = () => {
       channelRef.current?.send({
         type: "broadcast",
@@ -155,6 +167,8 @@ export default function RacePage() {
     sendFinish();
     // Resend every second for up to 15s in case the first send was dropped
     // or the opponent's tab is backgrounded/throttled and slow to receive.
+    // This still runs even though we already show an estimated result above,
+    // since we want the FINAL displayed number to be accurate, not just fast.
     let attempts = 0;
     finishTimerRef.current = setInterval(() => {
       attempts += 1;
@@ -224,16 +238,8 @@ export default function RacePage() {
       {myResult !== null && (
         <div style={{ marginTop: 16 }}>
           <p>{playerNameRef.current} (you): {Math.floor(myResult)}m</p>
-          {opponentResult !== null ? (
-            <p>Opponent: {Math.floor(opponentResult)}m</p>
-          ) : (
-            <p style={{ color: "#666" }}>
-              Waiting for opponent to finish… (if their tab is in the background, this can take a bit — ask them to switch back to it)
-            </p>
-          )}
-          {bothFinished && (
-            <h2>{tied ? "It's a tie!" : iWon ? "You win! 🎉" : "Opponent wins"}</h2>
-          )}
+          <p>Opponent: {Math.floor(opponentResult ?? 0)}m</p>
+          <h2>{tied ? "It's a tie!" : iWon ? "You win! 🎉" : "Opponent wins"}</h2>
         </div>
       )}
     </main>
