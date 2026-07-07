@@ -7,6 +7,9 @@ export default function Home() {
       <p>
         <Link href="/play">Go to the solo test page →</Link>
       </p>
+      <p>
+        <Link href="/multiplayer">Play online multiplayer →</Link>
+      </p>
     </main>
   );
 }

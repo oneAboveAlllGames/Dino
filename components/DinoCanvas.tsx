@@ -25,7 +25,9 @@ import { RemotePlayerState } from "../lib/types";
 
 interface DinoCanvasProps {
   seed: number;
-  distanceGoal: number; // px distance to finish line
+  distanceGoal?: number; // px distance to finish line (used if durationMs not set)
+  durationMs?: number; // if set, race runs for this long instead of to a distance goal
+  raceStartAt?: number; // shared epoch ms timestamp both players count down from (for sync)
   keymap?: { jump: string[]; duck: string[] }; // for split-screen: differing keys per player
   remoteState?: RemotePlayerState | null;
   onLocalUpdate?: (state: {
@@ -35,16 +37,25 @@ interface DinoCanvasProps {
     isStumbling: boolean;
     isBoosted: boolean;
   }) => void;
-  onFinish?: () => void;
+  onFinish?: (finalDistance: number) => void;
   width?: number;
   height?: number;
 }
 
 const DEFAULT_KEYMAP = { jump: ["Space", "ArrowUp"], duck: ["ArrowDown"] };
 
+function formatTime(ms: number): string {
+  const totalSeconds = Math.ceil(ms / 1000);
+  const m = Math.floor(totalSeconds / 60);
+  const s = totalSeconds % 60;
+  return `${m}:${s.toString().padStart(2, "0")}`;
+}
+
 export default function DinoCanvas({
   seed,
   distanceGoal,
+  durationMs,
+  raceStartAt,
   keymap = DEFAULT_KEYMAP,
   remoteState,
   onLocalUpdate,
@@ -58,6 +69,10 @@ export default function DinoCanvas({
   const finishedRef = useRef(false);
   const rafRef = useRef<number>(0);
   const lastTsRef = useRef<number>(0);
+  const startAtRef = useRef<number>(raceStartAt ?? Date.now());
+  const [timeLeftMs, setTimeLeftMs] = useState<number | null>(
+    durationMs ? durationMs : null
+  );
   const [, forceRender] = useState(0); // only used to trigger a final re-render on finish
 
   // --- Keyboard input ---
@@ -121,9 +136,18 @@ export default function DinoCanvas({
           isBoosted: engineRef.current.dino.isBoosted,
         });
 
-        if (engineRef.current.dino.distance >= distanceGoal) {
+        if (durationMs) {
+          const elapsed = performance.timeOrigin + ts - startAtRef.current;
+          const remaining = Math.max(0, durationMs - elapsed);
+          setTimeLeftMs(remaining);
+          if (remaining <= 0) {
+            finishedRef.current = true;
+            onFinish?.(engineRef.current.dino.distance);
+            forceRender((n) => n + 1);
+          }
+        } else if (distanceGoal && engineRef.current.dino.distance >= distanceGoal) {
           finishedRef.current = true;
-          onFinish?.();
+          onFinish?.(engineRef.current.dino.distance);
           forceRender((n) => n + 1);
         }
       }
@@ -135,10 +159,22 @@ export default function DinoCanvas({
     rafRef.current = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(rafRef.current);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [seed, distanceGoal, width, height]);
+  }, [seed, distanceGoal, durationMs, raceStartAt, width, height]);
 
   return (
     <div>
+      {durationMs && timeLeftMs !== null && (
+        <div
+          style={{
+            fontFamily: "monospace",
+            fontSize: 20,
+            marginBottom: 8,
+            fontWeight: "bold",
+          }}
+        >
+          {formatTime(timeLeftMs)}
+        </div>
+      )}
       <canvas
         ref={canvasRef}
         width={width}
