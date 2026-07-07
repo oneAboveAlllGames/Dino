@@ -72,10 +72,18 @@ export default function DinoCanvas({
   const rafRef = useRef<number>(0);
   const lastTsRef = useRef<number>(0);
   const startAtRef = useRef<number>(raceStartAt ?? Date.now());
+  const remoteStateRef = useRef<RemotePlayerState | null | undefined>(remoteState);
   const [timeLeftMs, setTimeLeftMs] = useState<number | null>(
     durationMs ? durationMs : null
   );
   const [, forceRender] = useState(0); // only used to trigger a final re-render on finish
+
+  // Keep the ref in sync with the latest prop so the animation loop (whose
+  // closure is only created once per game-config change) always reads the
+  // freshest opponent state rather than whatever it was when the loop started.
+  useEffect(() => {
+    remoteStateRef.current = remoteState;
+  }, [remoteState]);
 
   // --- Keyboard input ---
   useEffect(() => {
@@ -154,7 +162,7 @@ export default function DinoCanvas({
         }
       }
 
-      draw(canvasRef.current, engineRef.current, remoteState, config, width, height, localPlayerName);
+      draw(canvasRef.current, engineRef.current, remoteStateRef.current, config, width, height, localPlayerName);
       rafRef.current = requestAnimationFrame(loop);
     };
 
