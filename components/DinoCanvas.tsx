@@ -153,11 +153,16 @@ function draw(
   ctx.lineTo(width, groundY);
   ctx.stroke();
 
-  // Obstacles (faded once already hit — the player passes through them
-  // for the rest of their lifetime, so the fade signals "safe now")
+  // Obstacles: airborne ones (birds) rendered as clouds, ground ones
+  // (cacti) rendered as flames. Faded once already hit — the player passes
+  // through them for the rest of their lifetime, so the fade signals "safe now".
   for (const o of engine.obstacles) {
-    ctx.fillStyle = o.hit ? "rgba(83,83,83,0.25)" : "#535353";
-    ctx.fillRect(o.x, groundY + o.y - o.height, o.width, o.height);
+    const alpha = o.hit ? 0.25 : 1;
+    if (o.type === "bird") {
+      drawCloud(ctx, o.x, groundY + o.y - o.height, o.width, o.height, alpha);
+    } else {
+      drawFlame(ctx, o.x, groundY + o.y - o.height, o.width, o.height, alpha);
+    }
   }
 
   // Power-ups
@@ -335,7 +340,65 @@ function drawDino(
   }
 }
 
-function drawHorn(
+function drawCloud(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  top: number,
+  w: number,
+  h: number,
+  alpha: number
+) {
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.fillStyle = "#c7d3e0";
+  const cy = top + h / 2;
+  const r = h / 2;
+  // three overlapping puffs make a simple cloud silhouette
+  ctx.beginPath();
+  ctx.arc(x + r, cy, r, 0, Math.PI * 2);
+  ctx.arc(x + w * 0.45, cy - r * 0.35, r * 1.05, 0, Math.PI * 2);
+  ctx.arc(x + w - r, cy, r * 0.85, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+}
+
+function drawFlame(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  top: number,
+  w: number,
+  h: number,
+  alpha: number
+) {
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  const bottom = top + h;
+  const cx = x + w / 2;
+
+  // outer flame (orange-red)
+  ctx.fillStyle = "#e2521f";
+  ctx.beginPath();
+  ctx.moveTo(cx, top);
+  ctx.quadraticCurveTo(x + w * 0.9, top + h * 0.35, cx + w * 0.2, top + h * 0.55);
+  ctx.quadraticCurveTo(x + w, top + h * 0.75, cx, bottom);
+  ctx.quadraticCurveTo(x, top + h * 0.75, cx - w * 0.2, top + h * 0.55);
+  ctx.quadraticCurveTo(x + w * 0.1, top + h * 0.35, cx, top);
+  ctx.closePath();
+  ctx.fill();
+
+  // inner flame (yellow core)
+  ctx.fillStyle = "#f5c84c";
+  ctx.beginPath();
+  ctx.moveTo(cx, top + h * 0.32);
+  ctx.quadraticCurveTo(cx + w * 0.22, top + h * 0.55, cx + w * 0.08, top + h * 0.7);
+  ctx.quadraticCurveTo(cx, bottom - 2, cx, bottom);
+  ctx.quadraticCurveTo(cx, bottom - 2, cx - w * 0.08, top + h * 0.7);
+  ctx.quadraticCurveTo(cx - w * 0.22, top + h * 0.55, cx, top + h * 0.32);
+  ctx.closePath();
+  ctx.fill();
+
+  ctx.restore();
+}
   ctx: CanvasRenderingContext2D,
   baseX: number,
   baseY: number,
