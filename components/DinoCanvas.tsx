@@ -78,7 +78,24 @@ export default function DinoCanvas({
     };
   }, [keymap]);
 
-  // --- Game loop ---
+  // --- Touch controls (mobile has no keyboard) ---
+  // Tap/hold the canvas itself to jump. A dedicated on-screen duck button
+  // below the canvas handles ducking, since holding-to-duck via a plain tap
+  // on the canvas would conflict with jump taps.
+  const handleJumpStart = () => {
+    inputRef.current.jumpPressed = true;
+  };
+  const handleJumpEnd = () => {
+    inputRef.current.jumpPressed = false;
+  };
+  const handleDuckStart = () => {
+    inputRef.current.duckPressed = true;
+  };
+  const handleDuckEnd = () => {
+    inputRef.current.duckPressed = false;
+  };
+
+
   useEffect(() => {
     const config = { ...DEFAULT_CONFIG, seed };
 
@@ -121,12 +138,84 @@ export default function DinoCanvas({
   }, [seed, distanceGoal, width, height]);
 
   return (
-    <canvas
-      ref={canvasRef}
-      width={width}
-      height={height}
-      style={{ background: "#f7f7f7", borderBottom: "2px solid #535353" }}
-    />
+    <div>
+      <canvas
+        ref={canvasRef}
+        width={width}
+        height={height}
+        onMouseDown={handleJumpStart}
+        onMouseUp={handleJumpEnd}
+        onMouseLeave={handleJumpEnd}
+        onTouchStart={(e) => {
+          e.preventDefault();
+          handleJumpStart();
+        }}
+        onTouchEnd={(e) => {
+          e.preventDefault();
+          handleJumpEnd();
+        }}
+        style={{
+          background: "#f7f7f7",
+          borderBottom: "2px solid #535353",
+          width: "100%",
+          maxWidth: width,
+          touchAction: "none",
+        }}
+      />
+      {/* Mobile controls — hidden on larger screens via CSS below isn't
+          available inline, so we just always show them; they're harmless
+          (if unnecessary) on desktop, which still uses the keyboard. */}
+      <div style={{ display: "flex", gap: 12, marginTop: 12 }}>
+        <button
+          onMouseDown={handleJumpStart}
+          onMouseUp={handleJumpEnd}
+          onMouseLeave={handleJumpEnd}
+          onTouchStart={(e) => {
+            e.preventDefault();
+            handleJumpStart();
+          }}
+          onTouchEnd={(e) => {
+            e.preventDefault();
+            handleJumpEnd();
+          }}
+          style={{
+            flex: 1,
+            padding: "16px 0",
+            fontSize: 16,
+            borderRadius: 8,
+            border: "1px solid #535353",
+            background: "#fff",
+            touchAction: "none",
+          }}
+        >
+          Jump
+        </button>
+        <button
+          onMouseDown={handleDuckStart}
+          onMouseUp={handleDuckEnd}
+          onMouseLeave={handleDuckEnd}
+          onTouchStart={(e) => {
+            e.preventDefault();
+            handleDuckStart();
+          }}
+          onTouchEnd={(e) => {
+            e.preventDefault();
+            handleDuckEnd();
+          }}
+          style={{
+            flex: 1,
+            padding: "16px 0",
+            fontSize: 16,
+            borderRadius: 8,
+            border: "1px solid #535353",
+            background: "#fff",
+            touchAction: "none",
+          }}
+        >
+          Duck
+        </button>
+      </div>
+    </div>
   );
 }
 
