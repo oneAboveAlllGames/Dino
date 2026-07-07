@@ -24,7 +24,7 @@ export const DEFAULT_CONFIG: GameConfig = {
   duckHeight: 20,
   dinoWidth: 44,
   dinoHeight: 47,
-  stumbleDurationMs: 2000,
+  stumbleDurationMs: 1200,
   boostDurationMs: 3000,
   boostMultiplier: 1.7,
   boostSpawnIntervalPx: 1400,
@@ -213,18 +213,22 @@ export function updateEngine(
   }
 
   // --- Collision: obstacles -> stumble ---
+  // Once an obstacle has hit the player, it's marked `hit` and passed through
+  // for the rest of its lifetime — it can never stumble the player a second
+  // time, even though it keeps scrolling past at the same position.
   if (!dino.isStumbling) {
-    for (const o of obstacles) {
-      if (checkDinoCollision(dino, o, config)) {
+    obstacles = obstacles.map((o) => {
+      if (!o.hit && checkDinoCollision(dino, o, config)) {
         dino.isStumbling = true;
         dino.stumbleEndsAt = now + config.stumbleDurationMs;
         dino.isJumping = false;
         dino.isDucking = false;
         dino.velocityY = 0;
         dino.y = 0;
-        break;
+        return { ...o, hit: true };
       }
-    }
+      return o;
+    });
   }
 
   // --- Collision: power-ups -> boost ---

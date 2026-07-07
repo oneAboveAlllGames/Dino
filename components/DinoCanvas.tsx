@@ -153,9 +153,10 @@ function draw(
   ctx.lineTo(width, groundY);
   ctx.stroke();
 
-  // Obstacles
-  ctx.fillStyle = "#535353";
+  // Obstacles (faded once already hit — the player passes through them
+  // for the rest of their lifetime, so the fade signals "safe now")
   for (const o of engine.obstacles) {
+    ctx.fillStyle = o.hit ? "rgba(83,83,83,0.25)" : "#535353";
     ctx.fillRect(o.x, groundY + o.y - o.height, o.width, o.height);
   }
 

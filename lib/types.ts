@@ -9,6 +9,8 @@ export interface Obstacle {
   y: number;       // ground-relative y offset (birds fly higher)
   width: number;
   height: number;
+  hit?: boolean;   // once true, this obstacle can no longer trigger a stumble —
+                   // the player passes through it for the rest of its lifetime
 }
 
 export interface PowerUp {
