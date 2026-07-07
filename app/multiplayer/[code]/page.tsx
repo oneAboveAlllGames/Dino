@@ -16,7 +16,7 @@ import { useEffect, useRef, useState } from "react";
 import { useParams } from "next/navigation";
 import DinoCanvas from "../../../components/DinoCanvas";
 import { supabase } from "../../../lib/supabaseClient";
-import { GameRoom, getPlayerId, joinRoom, subscribeToRoom } from "../../../lib/rooms";
+import { GameRoom, getPlayerId, getPlayerName, joinRoom, subscribeToRoom } from "../../../lib/rooms";
 import { RemotePlayerState } from "../../../lib/types";
 
 export default function RacePage() {
@@ -30,12 +30,14 @@ export default function RacePage() {
   const [opponentResult, setOpponentResult] = useState<number | null>(null);
 
   const playerIdRef = useRef<string>("");
+  const playerNameRef = useRef<string>("Player");
   const channelRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
 
   // --- Load / join the room ---
   useEffect(() => {
     if (!code) return;
     playerIdRef.current = getPlayerId();
+    playerNameRef.current = getPlayerName();
 
     joinRoom(code)
       .then(setRoom)
@@ -88,6 +90,7 @@ export default function RacePage() {
       event: "state",
       payload: {
         playerId: playerIdRef.current,
+        playerName: playerNameRef.current,
         distance: state.distance,
         y: state.y,
         isDucking: state.isDucking,
@@ -129,6 +132,9 @@ export default function RacePage() {
       <main style={{ padding: 24, fontFamily: "system-ui" }}>
         <h1>Waiting for opponent…</h1>
         <p>
+          You're in as <strong>{playerNameRef.current}</strong>.
+        </p>
+        <p>
           Share this code: <strong style={{ fontSize: 24, letterSpacing: 2 }}>{room.code}</strong>
         </p>
       </main>
@@ -148,15 +154,16 @@ export default function RacePage() {
         durationMs={room.duration_ms}
         raceStartAt={room.started_at ? new Date(room.started_at).getTime() : Date.now()}
         remoteState={remoteState}
+        localPlayerName={playerNameRef.current}
         onLocalUpdate={handleLocalUpdate}
         onFinish={handleFinish}
       />
 
       {myResult !== null && (
         <div style={{ marginTop: 16 }}>
-          <p>Your distance: {Math.floor(myResult)}m</p>
+          <p>{playerNameRef.current} (you): {Math.floor(myResult)}m</p>
           {opponentResult !== null ? (
-            <p>Opponent distance: {Math.floor(opponentResult)}m</p>
+            <p>Opponent: {Math.floor(opponentResult)}m</p>
           ) : (
             <p style={{ color: "#666" }}>Waiting for opponent to finish…</p>
           )}

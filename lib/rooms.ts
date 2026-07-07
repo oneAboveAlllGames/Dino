@@ -19,6 +19,17 @@ export interface GameRoom {
 }
 
 const PLAYER_ID_KEY = "dino_player_id";
+const PLAYER_NAME_KEY = "dino_player_name";
+
+export function getPlayerName(): string {
+  if (typeof window === "undefined") return "Player";
+  return localStorage.getItem(PLAYER_NAME_KEY) || "Player";
+}
+
+export function setPlayerName(name: string) {
+  if (typeof window === "undefined") return;
+  localStorage.setItem(PLAYER_NAME_KEY, name.trim().slice(0, 16) || "Player");
+}
 
 // Each browser gets a persistent random id, stored in localStorage, so a
 // player reconnecting (e.g. after a refresh) is recognized as the same

@@ -4,9 +4,9 @@
 //
 // Lobby: create a room (pick round length) or join one by code.
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { createRoom, joinRoom } from "../../lib/rooms";
+import { createRoom, joinRoom, getPlayerName, setPlayerName } from "../../lib/rooms";
 
 const DURATION_OPTIONS = [
   { label: "1.5 min", ms: 90_000 },
@@ -16,13 +16,29 @@ const DURATION_OPTIONS = [
 
 export default function MultiplayerLobby() {
   const router = useRouter();
+  const [name, setName] = useState("");
   const [creating, setCreating] = useState(false);
   const [joining, setJoining] = useState(false);
   const [joinCode, setJoinCode] = useState("");
   const [error, setError] = useState<string | null>(null);
 
+  useEffect(() => {
+    const saved = getPlayerName();
+    if (saved !== "Player") setName(saved);
+  }, []);
+
+  const ensureName = () => {
+    if (!name.trim()) {
+      setError("Enter a name first");
+      return false;
+    }
+    setPlayerName(name);
+    return true;
+  };
+
   const handleCreate = async (durationMs: number) => {
     setError(null);
+    if (!ensureName()) return;
     setCreating(true);
     try {
       const room = await createRoom(durationMs);
@@ -36,6 +52,7 @@ export default function MultiplayerLobby() {
   const handleJoin = async () => {
     if (!joinCode.trim()) return;
     setError(null);
+    if (!ensureName()) return;
     setJoining(true);
     try {
       const room = await joinRoom(joinCode.trim());
@@ -49,6 +66,25 @@ export default function MultiplayerLobby() {
   return (
     <main style={{ padding: 24, fontFamily: "system-ui", maxWidth: 480 }}>
       <h1>Dino Multiplayer</h1>
+
+      <section style={{ marginTop: 16 }}>
+        <label style={{ fontSize: 14, color: "#666" }}>Your name</label>
+        <input
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          placeholder="e.g. Rowland"
+          maxLength={16}
+          style={{
+            display: "block",
+            width: "100%",
+            padding: "10px 12px",
+            fontSize: 15,
+            borderRadius: 8,
+            border: "1px solid #333",
+            marginTop: 4,
+          }}
+        />
+      </section>
 
       <section style={{ marginTop: 24 }}>
         <h2 style={{ fontSize: 18 }}>Create a race</h2>

@@ -57,6 +57,7 @@ export interface GameConfig {
 
 export interface RemotePlayerState {
   playerId: string;
+  playerName: string;
   distance: number;
   y: number;
   isDucking: boolean;

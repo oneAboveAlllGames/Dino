@@ -30,6 +30,7 @@ interface DinoCanvasProps {
   raceStartAt?: number; // shared epoch ms timestamp both players count down from (for sync)
   keymap?: { jump: string[]; duck: string[] }; // for split-screen: differing keys per player
   remoteState?: RemotePlayerState | null;
+  localPlayerName?: string;
   onLocalUpdate?: (state: {
     distance: number;
     y: number;
@@ -58,6 +59,7 @@ export default function DinoCanvas({
   raceStartAt,
   keymap = DEFAULT_KEYMAP,
   remoteState,
+  localPlayerName = "You",
   onLocalUpdate,
   onFinish,
   width = 900,
@@ -152,14 +154,14 @@ export default function DinoCanvas({
         }
       }
 
-      draw(canvasRef.current, engineRef.current, remoteState, config, width, height);
+      draw(canvasRef.current, engineRef.current, remoteState, config, width, height, localPlayerName);
       rafRef.current = requestAnimationFrame(loop);
     };
 
     rafRef.current = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(rafRef.current);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [seed, distanceGoal, durationMs, raceStartAt, width, height]);
+  }, [seed, distanceGoal, durationMs, raceStartAt, width, height, localPlayerName]);
 
   return (
     <div>
@@ -261,13 +263,15 @@ function draw(
   remote: RemotePlayerState | null | undefined,
   config: typeof DEFAULT_CONFIG,
   width: number,
-  height: number
+  height: number,
+  localPlayerName: string
 ) {
   if (!canvas) return;
   const ctx = canvas.getContext("2d");
   if (!ctx) return;
 
   const groundY = height - 40;
+  const PLAYER_X = 80;
 
   ctx.clearRect(0, 0, width, height);
 
@@ -308,7 +312,7 @@ function draw(
   // Local dino
   drawDino(
     ctx,
-    80,
+    PLAYER_X,
     groundY,
     engine.dino.y,
     engine.dino.isDucking,
@@ -317,15 +321,25 @@ function draw(
     config,
     "#333"
   );
+  drawNameLabel(ctx, PLAYER_X + config.dinoWidth / 2, groundY - config.dinoHeight - 18, localPlayerName, "#333");
 
-  // Remote/ghost dino (drawn slightly transparent, offset a bit vertically
-  // so the two dinos don't fully overlap when neck-and-neck)
+  // Remote/ghost dino — positioned relative to the ACTUAL distance gap
+  // between the two players (scaled down so it fits on screen), so passing
+  // your opponent is visually meaningful rather than always overlapping you.
   if (remote) {
-    ctx.globalAlpha = 0.75;
+    const gap = remote.distance - engine.dino.distance;
+    const scale = 0.15; // compress world-distance gap into screen pixels
+    const rawX = PLAYER_X + gap * scale;
+    const minX = 16;
+    const maxX = width - config.dinoWidth - 16;
+    const clampedX = Math.max(minX, Math.min(maxX, rawX));
+    const offscreen = rawX !== clampedX;
+
+    ctx.globalAlpha = 0.8;
     drawDino(
       ctx,
-      80,
-      groundY - 14,
+      clampedX,
+      groundY - 16, // slight vertical offset so a tied dino is still distinguishable
       remote.y,
       remote.isDucking,
       remote.isStumbling,
@@ -334,6 +348,27 @@ function draw(
       "#0077cc"
     );
     ctx.globalAlpha = 1;
+    drawNameLabel(
+      ctx,
+      clampedX + config.dinoWidth / 2,
+      groundY - 16 - config.dinoHeight - 18,
+      remote.playerName || "Opponent",
+      "#0077cc"
+    );
+
+    // Off-screen direction arrow: opponent is far enough ahead/behind that
+    // they've been clamped to the screen edge — show which way they are.
+    if (offscreen) {
+      const arrowX = rawX < minX ? 26 : width - 26;
+      const arrowDir = rawX < minX ? -1 : 1;
+      ctx.fillStyle = "#0077cc";
+      ctx.beginPath();
+      ctx.moveTo(arrowX + arrowDir * 6, groundY - 20);
+      ctx.lineTo(arrowX - arrowDir * 6, groundY - 26);
+      ctx.lineTo(arrowX - arrowDir * 6, groundY - 14);
+      ctx.closePath();
+      ctx.fill();
+    }
   }
 
   // Distance readout
@@ -344,6 +379,20 @@ function draw(
     ctx.fillStyle = "#0077cc";
     ctx.fillText(`${Math.floor(remote.distance)}m`, width - 90, 44);
   }
+}
+
+function drawNameLabel(
+  ctx: CanvasRenderingContext2D,
+  cx: number,
+  y: number,
+  name: string,
+  color: string
+) {
+  ctx.fillStyle = color;
+  ctx.font = "12px sans-serif";
+  ctx.textAlign = "center";
+  ctx.fillText(name, cx, y);
+  ctx.textAlign = "start";
 }
 
 // Original knight-bug character (not based on any copyrighted design):
