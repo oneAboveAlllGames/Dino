@@ -40,6 +40,7 @@ export default function RacePage() {
   const [remoteState, setRemoteState] = useState<RemotePlayerState | null>(null);
   const [myResult, setMyResult] = useState<number | null>(null);
   const [opponentResult, setOpponentResult] = useState<number | null>(null);
+  const [opponentName, setOpponentName] = useState<string>("Opponent");
   const [opponentPresent, setOpponentPresent] = useState(false);
   const [raceStartAt, setRaceStartAt] = useState<number | null>(null);
   const remoteStateRef = useRef<RemotePlayerState | null>(null);
@@ -49,6 +50,13 @@ export default function RacePage() {
   const channelRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
   const isHostRef = useRef(false);
   const finishTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // Distinguishes "we've received the opponent's real finish broadcast"
+  // from "we've merely guessed their result from their last known position".
+  // Only the former should stop us resending OUR OWN finish broadcast to
+  // them — otherwise our own estimate-setting was accidentally cancelling
+  // the safety-net resends meant to make sure THEY get OUR real number,
+  // which is what caused the two devices to disagree on the final result.
+  const receivedAuthoritativeFinishRef = useRef(false);
 
   // --- Load / persist room membership in the background (not UI-blocking) ---
   useEffect(() => {
@@ -99,12 +107,14 @@ export default function RacePage() {
         if (payload.playerId !== playerIdRef.current) {
           setRemoteState(payload as RemotePlayerState);
           remoteStateRef.current = payload as RemotePlayerState;
+          if (payload.playerName) setOpponentName(payload.playerName);
         }
       })
       .on("broadcast", { event: "finish" }, ({ payload }) => {
         if (payload.playerId !== playerIdRef.current) {
           // Authoritative — always overwrite our estimate with the real value.
           setOpponentResult(payload.distance);
+          receivedAuthoritativeFinishRef.current = true;
         }
       })
       .subscribe(async (status) => {
@@ -179,9 +189,11 @@ export default function RacePage() {
     }, 1000);
   };
 
-  // Stop resending once we've heard back from the opponent.
+  // Stop resending once we've heard the opponent's REAL finish broadcast —
+  // not just our own estimate of it (see receivedAuthoritativeFinishRef
+  // comment above for why this distinction matters).
   useEffect(() => {
-    if (opponentResult !== null && finishTimerRef.current) {
+    if (receivedAuthoritativeFinishRef.current && finishTimerRef.current) {
       clearInterval(finishTimerRef.current);
     }
   }, [opponentResult]);
@@ -238,8 +250,8 @@ export default function RacePage() {
       {myResult !== null && (
         <div style={{ marginTop: 16 }}>
           <p>{playerNameRef.current} (you): {Math.floor(myResult)}m</p>
-          <p>Opponent: {Math.floor(opponentResult ?? 0)}m</p>
-          <h2>{tied ? "It's a tie!" : iWon ? "You win! 🎉" : "Opponent wins"}</h2>
+          <p>{opponentName}: {Math.floor(opponentResult ?? 0)}m</p>
+          <h2>{tied ? "It's a tie!" : iWon ? "You win! 🎉" : `${opponentName} wins`}</h2>
         </div>
       )}
     </main>
