@@ -2,11 +2,14 @@
 
 // app/multiplayer/page.tsx
 //
-// Lobby: create a room (pick round length) or join one by code.
+// Lobby: create a room (pick round length) or join one by code. Joining no
+// longer writes to the database at all — room membership is entirely
+// Presence-based once you land on the room page, so "joining" here is just
+// validating the code exists before navigating.
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { createRoom, joinRoom, getPlayerName, setPlayerName } from "../../lib/rooms";
+import { createRoom, getRoomByCode, getPlayerName, setPlayerName } from "../../lib/rooms";
 
 const DURATION_OPTIONS = [
   { label: "1.5 min", ms: 90_000 },
@@ -55,10 +58,10 @@ export default function MultiplayerLobby() {
     if (!ensureName()) return;
     setJoining(true);
     try {
-      const room = await joinRoom(joinCode.trim());
-      router.push(`/multiplayer/${room.code}`);
+      await getRoomByCode(joinCode.trim()); // just validates it exists
+      router.push(`/multiplayer/${joinCode.trim().toUpperCase()}`);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to join room");
+      setError(e instanceof Error ? e.message : "Room not found");
       setJoining(false);
     }
   };
@@ -108,6 +111,9 @@ export default function MultiplayerLobby() {
             </button>
           ))}
         </div>
+        <p style={{ color: "#999", fontSize: 12, marginTop: 6 }}>
+          You'll land in a waiting room where anyone can join with the code — start whenever everyone's ready.
+        </p>
       </section>
 
       <section style={{ marginTop: 32 }}>

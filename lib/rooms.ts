@@ -1,8 +1,15 @@
 // lib/rooms.ts
 //
-// Room/lobby logic backed by a `game_rooms` table in Supabase. See
-// supabase-schema.sql for the table definition and RLS policies to run
-// once in your Supabase project's SQL editor.
+// Room logic for N-player races. Live room membership (who's in the
+// waiting room, who's ready) is NOT stored in the database — it's tracked
+// entirely via Supabase Realtime Presence on a channel scoped to the room
+// code. This avoids a write to the database every time someone joins,
+// toggles ready, etc., and Presence updates are near-instant compared to
+// database round trips. The database is only used for:
+//   1. Creating the room (so a code can be looked up / validated)
+//   2. Storing each player's final race result (the one place where we
+//      genuinely need a single, durable source of truth all clients agree
+//      on, since Broadcast messages can be dropped)
 
 import { supabase } from "./supabaseClient";
 
@@ -12,16 +19,28 @@ export interface GameRoom {
   seed: number;
   duration_ms: number;
   status: "waiting" | "active" | "finished";
-  player1_id: string;
-  player2_id: string | null;
-  player1_distance: number | null;
-  player2_distance: number | null;
-  started_at: string | null;
+  host_id: string;
   created_at: string;
+}
+
+export interface RaceResult {
+  player_id: string;
+  player_name: string;
+  distance: number;
 }
 
 const PLAYER_ID_KEY = "dino_player_id";
 const PLAYER_NAME_KEY = "dino_player_name";
+
+export function getPlayerId(): string {
+  if (typeof window === "undefined") return "";
+  let id = localStorage.getItem(PLAYER_ID_KEY);
+  if (!id) {
+    id = crypto.randomUUID();
+    localStorage.setItem(PLAYER_ID_KEY, id);
+  }
+  return id;
+}
 
 export function getPlayerName(): string {
   if (typeof window === "undefined") return "Player";
@@ -33,23 +52,8 @@ export function setPlayerName(name: string) {
   localStorage.setItem(PLAYER_NAME_KEY, name.trim().slice(0, 16) || "Player");
 }
 
-// Each browser gets a persistent random id, stored in localStorage, so a
-// player reconnecting (e.g. after a refresh) is recognized as the same
-// player rather than treated as a new one.
-export function getPlayerId(): string {
-  if (typeof window === "undefined") return "";
-  let id = localStorage.getItem(PLAYER_ID_KEY);
-  if (!id) {
-    id = crypto.randomUUID();
-    localStorage.setItem(PLAYER_ID_KEY, id);
-  }
-  return id;
-}
-
 function generateRoomCode(): string {
-  // 5 uppercase letters/digits, excluding easily-confused characters
-  // (0/O, 1/I) so codes are easy to read aloud or type on mobile.
-  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // no 0/O, 1/I
   let code = "";
   for (let i = 0; i < 5; i++) {
     code += chars[Math.floor(Math.random() * chars.length)];
@@ -58,19 +62,13 @@ function generateRoomCode(): string {
 }
 
 export async function createRoom(durationMs: number): Promise<GameRoom> {
-  const playerId = getPlayerId();
+  const hostId = getPlayerId();
   const code = generateRoomCode();
   const seed = Math.floor(Math.random() * 2 ** 31);
 
   const { data, error } = await supabase
     .from("game_rooms")
-    .insert({
-      code,
-      seed,
-      duration_ms: durationMs,
-      status: "waiting",
-      player1_id: playerId,
-    })
+    .insert({ code, seed, duration_ms: durationMs, status: "waiting", host_id: hostId })
     .select()
     .single();
 
@@ -78,85 +76,41 @@ export async function createRoom(durationMs: number): Promise<GameRoom> {
   return data as GameRoom;
 }
 
-export async function joinRoom(code: string): Promise<GameRoom> {
-  const playerId = getPlayerId();
+// New room for a rematch — same duration, fresh seed/code, same host.
+export async function createRematchRoom(durationMs: number): Promise<GameRoom> {
+  return createRoom(durationMs);
+}
 
-  const { data: room, error: fetchError } = await supabase
+export async function getRoomByCode(code: string): Promise<GameRoom> {
+  const { data, error } = await supabase
     .from("game_rooms")
     .select()
     .eq("code", code.toUpperCase())
-    .single();
-
-  if (fetchError || !room) throw new Error("Room not found");
-
-  // Already the host, or already the joined player (reconnect) — just
-  // return the room as-is.
-  if (room.player1_id === playerId || room.player2_id === playerId) {
-    return room as GameRoom;
-  }
-
-  if (room.player2_id) {
-    throw new Error("Room is full");
-  }
-
-  // Race-condition-safe join: only succeeds if player2_id is still null
-  // at the moment of the update, so two people can't both claim slot 2.
-  const { data, error } = await supabase
-    .from("game_rooms")
-    .update({ player2_id: playerId, status: "active", started_at: new Date().toISOString() })
-    .eq("id", room.id)
-    .is("player2_id", null)
-    .select()
-    .single();
-
-  if (error || !data) throw new Error("Room was just filled by someone else — try another code");
-  return data as GameRoom;
-}
-
-export function subscribeToRoom(
-  roomId: string,
-  onChange: (room: GameRoom) => void
-) {
-  const channel = supabase
-    .channel(`room-changes-${roomId}`)
-    .on(
-      "postgres_changes",
-      { event: "UPDATE", schema: "public", table: "game_rooms", filter: `id=eq.${roomId}` },
-      (payload) => onChange(payload.new as GameRoom)
-    )
-    .subscribe();
-
-  return () => {
-    supabase.removeChannel(channel);
-  };
-}
-
-// Writes YOUR OWN final distance to the room row — this is the
-// authoritative source both clients ultimately reconcile against, since
-// broadcast messages can be dropped (especially when both players finish
-// at nearly the same instant, which is exactly when it matters most).
-// Broadcast is still used for a fast initial estimate; this guarantees
-// both devices eventually agree on the exact same two numbers.
-export async function reportFinish(
-  roomId: string,
-  isHost: boolean,
-  distance: number
-): Promise<void> {
-  const column = isHost ? "player1_distance" : "player2_distance";
-  const { error } = await supabase
-    .from("game_rooms")
-    .update({ [column]: distance })
-    .eq("id", roomId);
-  if (error) throw error;
-}
-
-export async function fetchRoom(roomId: string): Promise<GameRoom> {
-  const { data, error } = await supabase
-    .from("game_rooms")
-    .select()
-    .eq("id", roomId)
     .single();
   if (error || !data) throw new Error("Room not found");
   return data as GameRoom;
 }
 
+export async function reportRaceResult(
+  roomId: string,
+  playerId: string,
+  playerName: string,
+  distance: number
+): Promise<void> {
+  const { error } = await supabase
+    .from("race_results")
+    .upsert(
+      { room_id: roomId, player_id: playerId, player_name: playerName, distance },
+      { onConflict: "room_id,player_id" }
+    );
+  if (error) throw error;
+}
+
+export async function fetchRaceResults(roomId: string): Promise<RaceResult[]> {
+  const { data, error } = await supabase
+    .from("race_results")
+    .select("player_id, player_name, distance")
+    .eq("room_id", roomId);
+  if (error) throw error;
+  return (data ?? []) as RaceResult[];
+}

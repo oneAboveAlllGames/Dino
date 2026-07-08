@@ -29,7 +29,7 @@ interface DinoCanvasProps {
   durationMs?: number; // if set, race runs for this long instead of to a distance goal
   raceStartAt?: number; // shared epoch ms timestamp both players count down from (for sync)
   keymap?: { jump: string[]; duck: string[] }; // for split-screen: differing keys per player
-  remoteState?: RemotePlayerState | null;
+  remoteStates?: RemotePlayerState[];
   localPlayerName?: string;
   onLocalUpdate?: (state: {
     distance: number;
@@ -58,7 +58,7 @@ export default function DinoCanvas({
   durationMs,
   raceStartAt,
   keymap = DEFAULT_KEYMAP,
-  remoteState,
+  remoteStates = [],
   localPlayerName = "You",
   onLocalUpdate,
   onFinish,
@@ -72,7 +72,7 @@ export default function DinoCanvas({
   const rafRef = useRef<number>(0);
   const lastTsRef = useRef<number>(0);
   const startAtRef = useRef<number>(raceStartAt ?? Date.now());
-  const remoteStateRef = useRef<RemotePlayerState | null | undefined>(remoteState);
+  const remoteStatesRef = useRef<RemotePlayerState[]>(remoteStates);
   const [timeLeftMs, setTimeLeftMs] = useState<number | null>(
     durationMs ? durationMs : null
   );
@@ -82,8 +82,8 @@ export default function DinoCanvas({
   // closure is only created once per game-config change) always reads the
   // freshest opponent state rather than whatever it was when the loop started.
   useEffect(() => {
-    remoteStateRef.current = remoteState;
-  }, [remoteState]);
+    remoteStatesRef.current = remoteStates;
+  }, [remoteStates]);
 
   // --- Keyboard input ---
   useEffect(() => {
@@ -162,7 +162,7 @@ export default function DinoCanvas({
         }
       }
 
-      draw(canvasRef.current, engineRef.current, remoteStateRef.current, config, width, height, localPlayerName);
+      draw(canvasRef.current, engineRef.current, remoteStatesRef.current, config, width, height, localPlayerName);
       rafRef.current = requestAnimationFrame(loop);
     };
 
@@ -265,10 +265,12 @@ export default function DinoCanvas({
   );
 }
 
+const OPPONENT_COLORS = ["#0077cc", "#cc0077", "#009966", "#cc8800", "#7733cc", "#0099aa"];
+
 function draw(
   canvas: HTMLCanvasElement | null,
   engine: EngineState,
-  remote: RemotePlayerState | null | undefined,
+  remotes: RemotePlayerState[],
   config: typeof DEFAULT_CONFIG,
   width: number,
   height: number,
@@ -331,72 +333,80 @@ function draw(
   );
   drawNameLabel(ctx, PLAYER_X + config.dinoWidth / 2, groundY - config.dinoHeight - 18, localPlayerName, "#333");
 
-  // Remote/ghost dino — positioned relative to the ACTUAL distance gap
-  // between the two players (scaled down so it fits on screen), so passing
-  // your opponent is visually meaningful rather than always overlapping you.
-  if (remote) {
+  // Remote/ghost dinos — each positioned relative to the ACTUAL distance
+  // gap between you and them (scaled down so it fits on screen), so passing
+  // an opponent is visually meaningful rather than everyone overlapping you.
+  // Each opponent gets a distinct color and a small vertical offset (by
+  // index) so multiple ghosts near the same position stay distinguishable.
+  const minX = 16;
+  const maxX = width - config.dinoWidth - 16;
+  const scale = 0.15; // compress world-distance gap into screen pixels
+  let edgeStackTop = 0; // stacks off-screen indicator labels so they don't overlap
+  let edgeStackBottom = 0;
+
+  remotes.forEach((remote, i) => {
+    const color = OPPONENT_COLORS[i % OPPONENT_COLORS.length];
     const gap = remote.distance - engine.dino.distance;
-    const scale = 0.15; // compress world-distance gap into screen pixels
     const rawX = PLAYER_X + gap * scale;
-    const minX = 16;
-    const maxX = width - config.dinoWidth - 16;
     const clampedX = Math.max(minX, Math.min(maxX, rawX));
     const offscreen = rawX !== clampedX;
+    const yOffset = -16 - (i % 3) * 10; // stagger overlapping ghosts vertically
 
     ctx.globalAlpha = 0.8;
     drawDino(
       ctx,
       clampedX,
-      groundY - 16, // slight vertical offset so a tied dino is still distinguishable
+      groundY + yOffset,
       remote.y,
       remote.isDucking,
       remote.isStumbling,
       remote.isBoosted,
       config,
-      "#0077cc"
+      color
     );
     ctx.globalAlpha = 1;
     drawNameLabel(
       ctx,
       clampedX + config.dinoWidth / 2,
-      groundY - 16 - config.dinoHeight - 18,
+      groundY + yOffset - config.dinoHeight - 18,
       remote.playerName || "Opponent",
-      "#0077cc"
+      color
     );
 
-    // Off-screen direction arrow: opponent is far enough ahead/behind that
-    // they've been clamped to the screen edge — show which way they are,
-    // PLUS the actual live gap in meters. The marker itself stops moving
-    // once clamped, so without this number it looks like your lead has
-    // stalled even though it's still growing — the number is what proves
-    // it hasn't.
+    // Off-screen direction arrow + live gap number — the marker itself
+    // stops moving once clamped to the edge, so without this number it
+    // looks like your lead has stalled even though it's still growing.
     if (offscreen) {
-      const arrowX = rawX < minX ? 26 : width - 26;
-      const arrowDir = rawX < minX ? -1 : 1;
-      ctx.fillStyle = "#0077cc";
+      const isLeft = rawX < minX;
+      const arrowX = isLeft ? 26 : width - 26;
+      const arrowDir = isLeft ? -1 : 1;
+      const stackIndex = isLeft ? edgeStackTop++ : edgeStackBottom++;
+      const arrowY = groundY - 20 - stackIndex * 16;
+
+      ctx.fillStyle = color;
       ctx.beginPath();
-      ctx.moveTo(arrowX + arrowDir * 6, groundY - 20);
-      ctx.lineTo(arrowX - arrowDir * 6, groundY - 26);
-      ctx.lineTo(arrowX - arrowDir * 6, groundY - 14);
+      ctx.moveTo(arrowX + arrowDir * 6, arrowY);
+      ctx.lineTo(arrowX - arrowDir * 6, arrowY - 6);
+      ctx.lineTo(arrowX - arrowDir * 6, arrowY + 6);
       ctx.closePath();
       ctx.fill();
 
       const gapLabel = `${gap < 0 ? "+" : ""}${Math.abs(Math.round(gap))}m ${gap < 0 ? "ahead" : "behind"}`;
       ctx.font = "11px monospace";
       ctx.textAlign = arrowDir < 0 ? "left" : "right";
-      ctx.fillText(gapLabel, arrowDir < 0 ? arrowX + 12 : arrowX - 12, groundY - 20);
+      ctx.fillText(gapLabel, arrowDir < 0 ? arrowX + 12 : arrowX - 12, arrowY);
       ctx.textAlign = "start";
     }
-  }
+  });
 
-  // Distance readout
+  // Distance readout / mini leaderboard, top-right
   ctx.fillStyle = "#333";
-  ctx.font = "16px monospace";
-  ctx.fillText(`${Math.floor(engine.dino.distance)}m`, width - 90, 24);
-  if (remote) {
-    ctx.fillStyle = "#0077cc";
-    ctx.fillText(`${Math.floor(remote.distance)}m`, width - 90, 44);
-  }
+  ctx.font = "14px monospace";
+  ctx.fillText(`${Math.floor(engine.dino.distance)}m`, width - 90, 20);
+  remotes.forEach((remote, i) => {
+    ctx.fillStyle = OPPONENT_COLORS[i % OPPONENT_COLORS.length];
+    ctx.fillText(`${Math.floor(remote.distance)}m`, width - 90, 20 + (i + 1) * 18);
+  });
 }
 
 function drawNameLabel(
