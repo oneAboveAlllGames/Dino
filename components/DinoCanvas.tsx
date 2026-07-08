@@ -365,7 +365,11 @@ function draw(
     );
 
     // Off-screen direction arrow: opponent is far enough ahead/behind that
-    // they've been clamped to the screen edge — show which way they are.
+    // they've been clamped to the screen edge — show which way they are,
+    // PLUS the actual live gap in meters. The marker itself stops moving
+    // once clamped, so without this number it looks like your lead has
+    // stalled even though it's still growing — the number is what proves
+    // it hasn't.
     if (offscreen) {
       const arrowX = rawX < minX ? 26 : width - 26;
       const arrowDir = rawX < minX ? -1 : 1;
@@ -376,6 +380,12 @@ function draw(
       ctx.lineTo(arrowX - arrowDir * 6, groundY - 14);
       ctx.closePath();
       ctx.fill();
+
+      const gapLabel = `${gap < 0 ? "+" : ""}${Math.abs(Math.round(gap))}m ${gap < 0 ? "ahead" : "behind"}`;
+      ctx.font = "11px monospace";
+      ctx.textAlign = arrowDir < 0 ? "left" : "right";
+      ctx.fillText(gapLabel, arrowDir < 0 ? arrowX + 12 : arrowX - 12, groundY - 20);
+      ctx.textAlign = "start";
     }
   }
 
