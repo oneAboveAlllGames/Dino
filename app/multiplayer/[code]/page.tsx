@@ -28,7 +28,7 @@ import { useEffect, useRef, useState } from "react";
 import { useParams } from "next/navigation";
 import DinoCanvas from "../../../components/DinoCanvas";
 import { supabase } from "../../../lib/supabaseClient";
-import { GameRoom, getPlayerId, getPlayerName, joinRoom } from "../../../lib/rooms";
+import { GameRoom, getPlayerId, getPlayerName, joinRoom, reportFinish, fetchRoom } from "../../../lib/rooms";
 import { RemotePlayerState } from "../../../lib/types";
 
 export default function RacePage() {
@@ -57,6 +57,8 @@ export default function RacePage() {
   // the safety-net resends meant to make sure THEY get OUR real number,
   // which is what caused the two devices to disagree on the final result.
   const receivedAuthoritativeFinishRef = useRef(false);
+  const reconcilePollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [reconciled, setReconciled] = useState(false);
 
   // --- Load / persist room membership in the background (not UI-blocking) ---
   useEffect(() => {
@@ -127,6 +129,7 @@ export default function RacePage() {
     return () => {
       supabase.removeChannel(channel);
       if (finishTimerRef.current) clearInterval(finishTimerRef.current);
+      if (reconcilePollRef.current) clearInterval(reconcilePollRef.current);
     };
   }, [code]);
 
@@ -157,13 +160,8 @@ export default function RacePage() {
   const handleFinish = (finalDistance: number) => {
     setMyResult(finalDistance);
 
-    // Show a result the instant OUR timer ends, rather than waiting on the
-    // opponent's own finish message — since both clients share the same
-    // raceStartAt/durationMs, their timer ends at essentially the same
-    // moment as ours, so their last-known distance (from the ~10x/sec state
-    // broadcasts) is already a very close estimate of their final score.
-    // If their actual "finish" broadcast arrives a moment later with a more
-    // precise number, the listener above overwrites this estimate.
+    // Show a fast estimate immediately using the opponent's last known
+    // broadcast position, so the screen isn't blank while we wait.
     setOpponentResult((prev) => prev ?? remoteStateRef.current?.distance ?? 0);
 
     const sendFinish = () => {
@@ -173,20 +171,54 @@ export default function RacePage() {
         payload: { playerId: playerIdRef.current, distance: finalDistance },
       });
     };
-
     sendFinish();
-    // Resend every second for up to 15s in case the first send was dropped
-    // or the opponent's tab is backgrounded/throttled and slow to receive.
-    // This still runs even though we already show an estimated result above,
-    // since we want the FINAL displayed number to be accurate, not just fast.
     let attempts = 0;
     finishTimerRef.current = setInterval(() => {
       attempts += 1;
       sendFinish();
-      if (attempts >= 15) {
-        if (finishTimerRef.current) clearInterval(finishTimerRef.current);
+      if (attempts >= 15 && finishTimerRef.current) {
+        clearInterval(finishTimerRef.current);
       }
     }, 1000);
+
+    // Authoritative path: write our own result to the database, then poll
+    // the room row until BOTH players' distances are present, and use
+    // those exact two numbers as the final, guaranteed-consistent result —
+    // this is what both devices ultimately agree on, regardless of whether
+    // any broadcast message got dropped along the way.
+    if (room?.id) {
+      let pollAttempts = 0;
+      reportFinish(room.id, isHostRef.current, finalDistance).catch(() => {
+        // If this write fails (e.g. transient network issue), the poll
+        // below will simply keep retrying the read side; we don't need
+        // special handling here.
+      });
+
+      reconcilePollRef.current = setInterval(async () => {
+        pollAttempts += 1;
+        try {
+          const r = await fetchRoom(room.id);
+          const mine = isHostRef.current ? r.player1_distance : r.player2_distance;
+          const theirs = isHostRef.current ? r.player2_distance : r.player1_distance;
+          if (mine !== null && theirs !== null) {
+            setMyResult(mine);
+            setOpponentResult(theirs);
+            setReconciled(true);
+            receivedAuthoritativeFinishRef.current = true;
+            if (reconcilePollRef.current) clearInterval(reconcilePollRef.current);
+            if (finishTimerRef.current) clearInterval(finishTimerRef.current);
+          }
+        } catch {
+          // keep retrying on the next tick
+        }
+        if (pollAttempts >= 25 && reconcilePollRef.current) {
+          // ~20s cap — if we still don't have both sides by now, something's
+          // wrong (opponent likely disconnected); stop polling rather than
+          // running forever. The estimated result stays on screen.
+          clearInterval(reconcilePollRef.current);
+        }
+      }, 800);
+    }
   };
 
   // Stop resending once we've heard the opponent's REAL finish broadcast —
@@ -252,6 +284,9 @@ export default function RacePage() {
           <p>{playerNameRef.current} (you): {Math.floor(myResult)}m</p>
           <p>{opponentName}: {Math.floor(opponentResult ?? 0)}m</p>
           <h2>{tied ? "It's a tie!" : iWon ? "You win! 🎉" : `${opponentName} wins`}</h2>
+          {!reconciled && (
+            <p style={{ color: "#999", fontSize: 13 }}>Confirming final result…</p>
+          )}
         </div>
       )}
     </main>

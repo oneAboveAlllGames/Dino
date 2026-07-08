@@ -14,6 +14,8 @@ export interface GameRoom {
   status: "waiting" | "active" | "finished";
   player1_id: string;
   player2_id: string | null;
+  player1_distance: number | null;
+  player2_distance: number | null;
   started_at: string | null;
   created_at: string;
 }
@@ -128,3 +130,33 @@ export function subscribeToRoom(
     supabase.removeChannel(channel);
   };
 }
+
+// Writes YOUR OWN final distance to the room row — this is the
+// authoritative source both clients ultimately reconcile against, since
+// broadcast messages can be dropped (especially when both players finish
+// at nearly the same instant, which is exactly when it matters most).
+// Broadcast is still used for a fast initial estimate; this guarantees
+// both devices eventually agree on the exact same two numbers.
+export async function reportFinish(
+  roomId: string,
+  isHost: boolean,
+  distance: number
+): Promise<void> {
+  const column = isHost ? "player1_distance" : "player2_distance";
+  const { error } = await supabase
+    .from("game_rooms")
+    .update({ [column]: distance })
+    .eq("id", roomId);
+  if (error) throw error;
+}
+
+export async function fetchRoom(roomId: string): Promise<GameRoom> {
+  const { data, error } = await supabase
+    .from("game_rooms")
+    .select()
+    .eq("id", roomId)
+    .single();
+  if (error || !data) throw new Error("Room not found");
+  return data as GameRoom;
+}
+
