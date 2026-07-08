@@ -50,9 +50,15 @@ export interface GameConfig {
   stumbleDurationMs: number;
   boostDurationMs: number;
   boostMultiplier: number;
-  boostSpawnIntervalPx: number; // avg distance between boost spawns
   obstacleMinGapPx: number;
   obstacleMaxGapPx: number;
+  // Boosts are now spawned on a fixed schedule spread evenly across the
+  // race's actual TIME (not distance) — e.g. a fixed count of boosts for a
+  // 1.5/2/3 min race, appearing at regular intervals regardless of how far
+  // any given player has traveled. This replaces the old random
+  // distance-based spawn interval.
+  boostCount: number;
+  raceDurationMs: number;
 }
 
 export interface RemotePlayerState {

@@ -27,9 +27,10 @@ export const DEFAULT_CONFIG: GameConfig = {
   stumbleDurationMs: 1200,
   boostDurationMs: 3000,
   boostMultiplier: 1.7,
-  boostSpawnIntervalPx: 1400,
   obstacleMinGapPx: 300,
   obstacleMaxGapPx: 600,
+  boostCount: 6,
+  raceDurationMs: 90_000,
 };
 
 // --- Seeded RNG (mulberry32) ---------------------------------------------
@@ -70,9 +71,23 @@ export interface EngineState {
   nextObstacleId: number;
   nextPowerUpId: number;
   nextObstacleAt: number; // worldX threshold for next spawn
-  nextPowerUpAt: number;
   rng: () => number;
   gameOver: boolean; // "finished the race", not "died" — no death in this game
+  elapsedMs: number; // real time elapsed since the engine started
+  boostSpawnSchedule: number[]; // elapsedMs timestamps at which each boost spawns
+  nextBoostScheduleIndex: number;
+}
+
+// Precomputes evenly-spaced spawn times across the race duration, e.g. 6
+// boosts over a 90s race spawn at 90000*(1/7), 90000*(2/7), ... 90000*(6/7)
+// — evenly spread with a bit of breathing room at the very start and end
+// rather than exactly at 0 or exactly at the finish.
+function computeBoostSchedule(count: number, durationMs: number): number[] {
+  const schedule: number[] = [];
+  for (let i = 1; i <= count; i++) {
+    schedule.push((durationMs * i) / (count + 1));
+  }
+  return schedule;
 }
 
 export function createEngine(config: GameConfig): EngineState {
@@ -85,9 +100,11 @@ export function createEngine(config: GameConfig): EngineState {
     nextObstacleId: 1,
     nextPowerUpId: 1,
     nextObstacleAt: config.obstacleMinGapPx,
-    nextPowerUpAt: config.boostSpawnIntervalPx,
     rng,
     gameOver: false,
+    elapsedMs: 0,
+    boostSpawnSchedule: computeBoostSchedule(config.boostCount, config.raceDurationMs),
+    nextBoostScheduleIndex: 0,
   };
 }
 
@@ -168,7 +185,8 @@ export function updateEngine(
     .map((p) => ({ ...p, x: p.x - distanceDelta }))
     .filter((p) => p.x + p.width > -50 && !p.collected);
 
-  let { nextObstacleId, nextPowerUpId, nextObstacleAt, nextPowerUpAt, rng } = state;
+  let { nextObstacleId, nextPowerUpId, nextObstacleAt, rng } = state;
+  const elapsedMs = state.elapsedMs + dtMs;
 
   // --- Spawn new obstacle ---
   if (worldX >= nextObstacleAt) {
@@ -194,8 +212,14 @@ export function updateEngine(
     nextObstacleAt = worldX + gap;
   }
 
-  // --- Spawn new power-up ---
-  if (worldX >= nextPowerUpAt) {
+  // --- Spawn power-ups on the precomputed even-spacing time schedule ---
+  // (fixed count for the whole race — e.g. 6 for a 1.5min race, 10 for 2min,
+  // 15 for 3min — rather than randomly by distance travelled).
+  let nextBoostScheduleIndex = state.nextBoostScheduleIndex;
+  while (
+    nextBoostScheduleIndex < state.boostSpawnSchedule.length &&
+    elapsedMs >= state.boostSpawnSchedule[nextBoostScheduleIndex]
+  ) {
     powerUps = [
       ...powerUps,
       {
@@ -208,8 +232,7 @@ export function updateEngine(
       },
     ];
     nextPowerUpId += 1;
-    const jitter = (rng() - 0.5) * 400;
-    nextPowerUpAt = worldX + config.boostSpawnIntervalPx + jitter;
+    nextBoostScheduleIndex += 1;
   }
 
   // --- Collision: obstacles -> stumble ---
@@ -250,8 +273,9 @@ export function updateEngine(
     nextObstacleId,
     nextPowerUpId,
     nextObstacleAt,
-    nextPowerUpAt,
     rng,
+    elapsedMs,
+    nextBoostScheduleIndex,
   };
 }
 

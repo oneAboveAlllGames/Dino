@@ -52,6 +52,16 @@ function formatTime(ms: number): string {
   return `${m}:${s.toString().padStart(2, "0")}`;
 }
 
+// Fixed boost counts for the three standard race lengths, spread evenly
+// across the whole race by lib/gameEngine's computeBoostSchedule. Falls
+// back to a rough 1-per-12s ratio for any non-standard duration.
+function boostCountForDuration(durationMs: number): number {
+  if (durationMs === 90_000) return 6;
+  if (durationMs === 120_000) return 10;
+  if (durationMs === 180_000) return 15;
+  return Math.max(1, Math.round(durationMs / 12_000));
+}
+
 export default function DinoCanvas({
   seed,
   distanceGoal,
@@ -66,7 +76,15 @@ export default function DinoCanvas({
   height = 300,
 }: DinoCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const engineRef = useRef<EngineState>(createEngine({ ...DEFAULT_CONFIG, seed }));
+  const raceDurationMs = durationMs ?? DEFAULT_CONFIG.raceDurationMs;
+  const engineRef = useRef<EngineState>(
+    createEngine({
+      ...DEFAULT_CONFIG,
+      seed,
+      raceDurationMs,
+      boostCount: boostCountForDuration(raceDurationMs),
+    })
+  );
   const inputRef = useRef<InputState>({ jumpPressed: false, duckPressed: false });
   const finishedRef = useRef(false);
   const rafRef = useRef<number>(0);
@@ -122,7 +140,12 @@ export default function DinoCanvas({
 
 
   useEffect(() => {
-    const config = { ...DEFAULT_CONFIG, seed };
+    const config = {
+      ...DEFAULT_CONFIG,
+      seed,
+      raceDurationMs,
+      boostCount: boostCountForDuration(raceDurationMs),
+    };
 
     const loop = (ts: number) => {
       if (!lastTsRef.current) lastTsRef.current = ts;
