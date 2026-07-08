@@ -57,7 +57,6 @@ export default function RoomPage() {
   const [error, setError] = useState<string | null>(null);
   const [phase, setPhase] = useState<Phase>("waiting");
   const [players, setPlayers] = useState<PresenceInfo[]>([]);
-  const [myReady, setMyReady] = useState(false);
   const [countdownEndsAt, setCountdownEndsAt] = useState<number | null>(null);
   const [countdownLeft, setCountdownLeft] = useState(5);
   const [raceStartAt, setRaceStartAt] = useState<number | null>(null);
@@ -69,7 +68,6 @@ export default function RoomPage() {
   const playerIdRef = useRef("");
   const playerNameRef = useRef("Player");
   const channelRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
-  const myReadyRef = useRef(false);
   const finishTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const resultsPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const lastSentAtRef = useRef(0);
@@ -178,22 +176,34 @@ export default function RoomPage() {
   // and leave the channel briefly unresponsive. A short cooldown between
   // toggles prevents that while still feeling instant for normal use.
   const readyToggleCooldownRef = useRef(false);
+  const myPlayerEntry = players.find((p) => p.playerId === playerIdRef.current);
+  const myReady = myPlayerEntry?.ready ?? false;
 
-  const toggleReady = () => {
+  const toggleReady = async () => {
     if (readyToggleCooldownRef.current) return;
     readyToggleCooldownRef.current = true;
     setTimeout(() => {
       readyToggleCooldownRef.current = false;
     }, 400);
 
-    const next = !myReadyRef.current;
-    myReadyRef.current = next;
-    setMyReady(next);
-    channelRef.current?.track({
+    const next = !myReady;
+    const payload = {
       playerId: playerIdRef.current,
       playerName: playerNameRef.current,
       ready: next,
-    });
+    };
+
+    // track() can fail (e.g. transient network hiccup) without throwing in
+    // an obvious way — since we no longer keep a separate local "myReady"
+    // state, a failed track() now correctly leaves the button showing the
+    // OLD state rather than silently disagreeing with the actual room
+    // state, which was the root cause of the button/list mismatch. Retry
+    // once after a short delay if the first attempt didn't seem to land.
+    await channelRef.current?.track(payload);
+    setTimeout(() => {
+      const stillStale = players.find((p) => p.playerId === playerIdRef.current)?.ready !== next;
+      if (stillStale) channelRef.current?.track(payload);
+    }, 600);
   };
 
   const allReady = players.length >= 2 && players.every((p) => p.ready);
