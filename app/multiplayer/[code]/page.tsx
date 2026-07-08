@@ -173,7 +173,19 @@ export default function RoomPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [phase, countdownEndsAt, isHost]);
 
+  // Debounced: rapid tapping was firing a presence track() call on every
+  // click with no limit, which could hit Supabase's realtime rate limit
+  // and leave the channel briefly unresponsive. A short cooldown between
+  // toggles prevents that while still feeling instant for normal use.
+  const readyToggleCooldownRef = useRef(false);
+
   const toggleReady = () => {
+    if (readyToggleCooldownRef.current) return;
+    readyToggleCooldownRef.current = true;
+    setTimeout(() => {
+      readyToggleCooldownRef.current = false;
+    }, 400);
+
     const next = !myReadyRef.current;
     myReadyRef.current = next;
     setMyReady(next);
