@@ -149,19 +149,32 @@ export default function RoomPage() {
   }, [code, router]);
 
   // --- Countdown ticking + host resolves it into the actual race start ---
+  const raceStartSentRef = useRef(false);
+
   useEffect(() => {
-    if (phase !== "countdown" || !countdownEndsAt) return;
+    if (phase !== "countdown" || !countdownEndsAt) {
+      raceStartSentRef.current = false;
+      return;
+    }
 
     const tick = () => {
       const left = Math.ceil((countdownEndsAt - Date.now()) / 1000);
       setCountdownLeft(Math.max(0, left));
-      if (Date.now() >= countdownEndsAt) {
+      if (Date.now() >= countdownEndsAt && !raceStartSentRef.current) {
+        raceStartSentRef.current = true;
         if (isHost) {
+          const payload = { startAt: countdownEndsAt, playerCount: players.length };
           channelRef.current?.send({
             type: "broadcast",
             event: "race-start",
-            payload: { startAt: countdownEndsAt, playerCount: players.length },
+            payload,
           });
+          // The channel is configured with broadcast self:false, meaning
+          // the host never receives its own "race-start" message — so the
+          // host must apply this transition locally too, not just send it.
+          expectedPlayerCountRef.current = payload.playerCount;
+          setRaceStartAt(payload.startAt);
+          setPhase("racing");
         }
       }
     };
