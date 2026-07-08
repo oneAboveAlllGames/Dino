@@ -2,126 +2,136 @@
 
 // app/multiplayer/[code]/page.tsx
 //
-// The actual race. Two players in the same room.
+// Full room lifecycle for N players, all on one Realtime channel scoped to
+// the room code:
 //
-// Speed notes:
-//  - Room "join" detection uses Realtime Presence + Broadcast on the race
-//    channel itself, NOT Postgres change events. postgres_changes has real
-//    replication lag (often 1-3s+ on the free tier) because it waits on
-//    the database's write-ahead log; Presence/Broadcast are peer-to-peer
-//    over the same websocket and are near-instant. We still persist to the
-//    game_rooms table for reconnect/history purposes, but the UI never
-//    blocks on that round trip.
-//  - The "start" timestamp is agreed by broadcast (host picks it and tells
-//    the joiner) rather than by both clients separately reading the DB row,
-//    for the same reason.
-//  - Finish detection re-sends the local "finish" broadcast every second
-//    for a while after finishing. This covers the case where the opponent's
-//    browser tab was backgrounded — background tabs get their
-//    requestAnimationFrame loop throttled by the browser (often to ~1fps
-//    or less), which can genuinely delay their own finish detection. There
-//    isn't a way to fully bypass browser tab throttling from here, but
-//    resending reduces the chance of a single dropped message adding delay
-//    on top of that.
+//   waiting -> countdown -> racing -> results
+//
+// - "waiting": everyone in the room is tracked via Presence (playerId,
+//   name, ready). The host sees a "Start Race" button once at least 2
+//   players are present and everyone (including the host) is ready.
+// - "countdown": host clicked Start — a 5s countdown is broadcast with a
+//   shared target timestamp so every client counts down in sync. The host
+//   can cancel and return everyone to the waiting room (e.g. to let one
+//   more player join).
+// - "racing": the actual DinoCanvas race, synced to the countdown's end
+//   time. Live positions travel over Broadcast (fast, ~10/sec, not
+//   guaranteed); final results are written to the race_results table so
+//   every player's screen ends up agreeing on the exact same numbers even
+//   if some in-race broadcast messages were dropped.
+// - "results": leaderboard sorted by distance, with Rematch (host creates
+//   a fresh room and everyone is redirected automatically) and Home
+//   buttons.
 
 import { useEffect, useRef, useState } from "react";
-import { useParams } from "next/navigation";
+import { useParams, useRouter } from "next/navigation";
+import Link from "next/link";
 import DinoCanvas from "../../../components/DinoCanvas";
 import { supabase } from "../../../lib/supabaseClient";
-import { GameRoom, getPlayerId, getPlayerName, joinRoom, reportFinish, fetchRoom } from "../../../lib/rooms";
+import {
+  GameRoom,
+  RaceResult,
+  createRematchRoom,
+  getPlayerId,
+  getPlayerName,
+  getRoomByCode,
+  reportRaceResult,
+  fetchRaceResults,
+} from "../../../lib/rooms";
 import { RemotePlayerState } from "../../../lib/types";
 
-export default function RacePage() {
+type Phase = "waiting" | "countdown" | "racing" | "results";
+
+interface PresenceInfo {
+  playerId: string;
+  playerName: string;
+  ready: boolean;
+}
+
+export default function RoomPage() {
   const params = useParams();
+  const router = useRouter();
   const code = (params?.code as string)?.toUpperCase();
 
   const [room, setRoom] = useState<GameRoom | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [remoteState, setRemoteState] = useState<RemotePlayerState | null>(null);
-  const [myResult, setMyResult] = useState<number | null>(null);
-  const [opponentResult, setOpponentResult] = useState<number | null>(null);
-  const [opponentName, setOpponentName] = useState<string>("Opponent");
-  const [opponentPresent, setOpponentPresent] = useState(false);
+  const [phase, setPhase] = useState<Phase>("waiting");
+  const [players, setPlayers] = useState<PresenceInfo[]>([]);
+  const [myReady, setMyReady] = useState(false);
+  const [countdownEndsAt, setCountdownEndsAt] = useState<number | null>(null);
+  const [countdownLeft, setCountdownLeft] = useState(5);
   const [raceStartAt, setRaceStartAt] = useState<number | null>(null);
-  const remoteStateRef = useRef<RemotePlayerState | null>(null);
+  const [remoteStates, setRemoteStates] = useState<Record<string, RemotePlayerState>>({});
+  const [myResult, setMyResult] = useState<number | null>(null);
+  const [results, setResults] = useState<RaceResult[]>([]);
+  const [reconciling, setReconciling] = useState(false);
 
-  const playerIdRef = useRef<string>("");
-  const playerNameRef = useRef<string>("Player");
+  const playerIdRef = useRef("");
+  const playerNameRef = useRef("Player");
   const channelRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
-  const isHostRef = useRef(false);
+  const myReadyRef = useRef(false);
   const finishTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  // Distinguishes "we've received the opponent's real finish broadcast"
-  // from "we've merely guessed their result from their last known position".
-  // Only the former should stop us resending OUR OWN finish broadcast to
-  // them — otherwise our own estimate-setting was accidentally cancelling
-  // the safety-net resends meant to make sure THEY get OUR real number,
-  // which is what caused the two devices to disagree on the final result.
-  const receivedAuthoritativeFinishRef = useRef(false);
-  const reconcilePollRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const [reconciled, setReconciled] = useState(false);
+  const resultsPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const lastSentAtRef = useRef(0);
+  const expectedPlayerCountRef = useRef(0);
 
-  // --- Load / persist room membership in the background (not UI-blocking) ---
+  const isHost = room?.host_id === playerIdRef.current;
+
+  // --- Load room + set up identity ---
   useEffect(() => {
     if (!code) return;
     playerIdRef.current = getPlayerId();
     playerNameRef.current = getPlayerName();
 
-    joinRoom(code)
-      .then((r) => {
-        setRoom(r);
-        isHostRef.current = r.player1_id === playerIdRef.current;
-      })
-      .catch((e) => setError(e instanceof Error ? e.message : "Failed to load room"));
+    getRoomByCode(code)
+      .then(setRoom)
+      .catch((e) => setError(e instanceof Error ? e.message : "Room not found"));
   }, [code]);
 
-  // --- Realtime channel: presence for instant join detection, broadcast
-  //     for start-sync, in-race state, and finish results ---
+  // --- Realtime channel: presence for room membership, broadcast for
+  //     countdown/state/finish events ---
   useEffect(() => {
     if (!code) return;
 
-    const channel = supabase.channel(`race-${code}`, {
+    const channel = supabase.channel(`room-${code}`, {
       config: { broadcast: { self: false }, presence: { key: getPlayerId() } },
     });
 
     channel
       .on("presence", { event: "sync" }, () => {
         const state = channel.presenceState();
-        const otherPresent = Object.keys(state).some((k) => k !== playerIdRef.current);
-        setOpponentPresent(otherPresent);
-
-        // Host decides the shared start time as soon as both are present,
-        // and broadcasts it — much faster than waiting for a DB round trip
-        // both clients would otherwise poll for.
-        if (otherPresent && isHostRef.current && !raceStartAt) {
-          const startedAt = Date.now() + 1200; // short buffer so both clients are ready
-          channel.send({
-            type: "broadcast",
-            event: "start",
-            payload: { startedAt },
-          });
-          setRaceStartAt(startedAt);
-        }
+        const list: PresenceInfo[] = Object.values(state)
+          .flat()
+          .map((p: any) => ({ playerId: p.playerId, playerName: p.playerName, ready: p.ready }));
+        setPlayers(list);
       })
-      .on("broadcast", { event: "start" }, ({ payload }) => {
-        setRaceStartAt(payload.startedAt);
+      .on("broadcast", { event: "countdown-start" }, ({ payload }) => {
+        setCountdownEndsAt(payload.endsAt);
+        setPhase("countdown");
+      })
+      .on("broadcast", { event: "countdown-cancel" }, () => {
+        setCountdownEndsAt(null);
+        setPhase("waiting");
+      })
+      .on("broadcast", { event: "race-start" }, ({ payload }) => {
+        expectedPlayerCountRef.current = payload.playerCount;
+        setRaceStartAt(payload.startAt);
+        setPhase("racing");
       })
       .on("broadcast", { event: "state" }, ({ payload }) => {
-        if (payload.playerId !== playerIdRef.current) {
-          setRemoteState(payload as RemotePlayerState);
-          remoteStateRef.current = payload as RemotePlayerState;
-          if (payload.playerName) setOpponentName(payload.playerName);
-        }
+        if (payload.playerId === playerIdRef.current) return;
+        setRemoteStates((prev) => ({ ...prev, [payload.playerId]: payload as RemotePlayerState }));
       })
-      .on("broadcast", { event: "finish" }, ({ payload }) => {
-        if (payload.playerId !== playerIdRef.current) {
-          // Authoritative — always overwrite our estimate with the real value.
-          setOpponentResult(payload.distance);
-          receivedAuthoritativeFinishRef.current = true;
-        }
+      .on("broadcast", { event: "rematch" }, ({ payload }) => {
+        router.push(`/multiplayer/${payload.code}`);
       })
       .subscribe(async (status) => {
         if (status === "SUBSCRIBED") {
-          await channel.track({ joinedAt: Date.now() });
+          await channel.track({
+            playerId: playerIdRef.current,
+            playerName: playerNameRef.current,
+            ready: false,
+          });
         }
       });
 
@@ -129,18 +139,64 @@ export default function RacePage() {
     return () => {
       supabase.removeChannel(channel);
       if (finishTimerRef.current) clearInterval(finishTimerRef.current);
-      if (reconcilePollRef.current) clearInterval(reconcilePollRef.current);
+      if (resultsPollRef.current) clearInterval(resultsPollRef.current);
     };
-  }, [code]);
+  }, [code, router]);
 
-  // Throttle outgoing broadcasts to ~10/sec. The game loop calls this every
-  // animation frame (~60/sec), but Supabase Realtime rate-limits broadcast
-  // messages (commonly ~10/sec/client on the free tier) — sending 60/sec
-  // meant most messages were silently dropped, and each device ended up
-  // showing a different, stale snapshot of the opponent. This is very
-  // likely what caused the mismatched in-race numbers.
-  const lastSentAtRef = useRef(0);
-  const SEND_INTERVAL_MS = 100; // 10 times/sec
+  // --- Countdown ticking + host resolves it into the actual race start ---
+  useEffect(() => {
+    if (phase !== "countdown" || !countdownEndsAt) return;
+
+    const tick = () => {
+      const left = Math.ceil((countdownEndsAt - Date.now()) / 1000);
+      setCountdownLeft(Math.max(0, left));
+      if (Date.now() >= countdownEndsAt) {
+        if (isHost) {
+          channelRef.current?.send({
+            type: "broadcast",
+            event: "race-start",
+            payload: { startAt: countdownEndsAt, playerCount: players.length },
+          });
+        }
+      }
+    };
+    tick();
+    const interval = setInterval(tick, 200);
+    return () => clearInterval(interval);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [phase, countdownEndsAt, isHost]);
+
+  const toggleReady = () => {
+    const next = !myReadyRef.current;
+    myReadyRef.current = next;
+    setMyReady(next);
+    channelRef.current?.track({
+      playerId: playerIdRef.current,
+      playerName: playerNameRef.current,
+      ready: next,
+    });
+  };
+
+  const allReady = players.length >= 2 && players.every((p) => p.ready);
+
+  const handleStartRace = () => {
+    if (!isHost || !allReady) return;
+    const endsAt = Date.now() + 5000;
+    channelRef.current?.send({
+      type: "broadcast",
+      event: "countdown-start",
+      payload: { endsAt },
+    });
+    setCountdownEndsAt(endsAt);
+    setPhase("countdown");
+  };
+
+  const handleCancelCountdown = () => {
+    if (!isHost) return;
+    channelRef.current?.send({ type: "broadcast", event: "countdown-cancel", payload: {} });
+    setCountdownEndsAt(null);
+    setPhase("waiting");
+  };
 
   const handleLocalUpdate = (state: {
     distance: number;
@@ -150,7 +206,7 @@ export default function RacePage() {
     isBoosted: boolean;
   }) => {
     const now = Date.now();
-    if (now - lastSentAtRef.current < SEND_INTERVAL_MS) return;
+    if (now - lastSentAtRef.current < 100) return; // throttle to ~10/sec
     lastSentAtRef.current = now;
 
     channelRef.current?.send({
@@ -172,86 +228,60 @@ export default function RacePage() {
 
   const handleFinish = (finalDistance: number) => {
     setMyResult(finalDistance);
+    if (!room?.id) return;
 
-    // Show a fast estimate immediately using the opponent's last known
-    // broadcast position, so the screen isn't blank while we wait.
-    setOpponentResult((prev) => prev ?? remoteStateRef.current?.distance ?? 0);
+    reportRaceResult(room.id, playerIdRef.current, playerNameRef.current, finalDistance).catch(() => {});
 
-    const sendFinish = () => {
-      channelRef.current?.send({
-        type: "broadcast",
-        event: "finish",
-        payload: { playerId: playerIdRef.current, distance: finalDistance },
-      });
-    };
-    sendFinish();
     let attempts = 0;
-    finishTimerRef.current = setInterval(() => {
+    resultsPollRef.current = setInterval(async () => {
       attempts += 1;
-      sendFinish();
-      if (attempts >= 15 && finishTimerRef.current) {
-        clearInterval(finishTimerRef.current);
+      try {
+        const rows = await fetchRaceResults(room.id);
+        setResults(rows);
+        const expected = expectedPlayerCountRef.current || players.length;
+        if (rows.length >= expected) {
+          setPhase("results");
+          setReconciling(false);
+          if (resultsPollRef.current) clearInterval(resultsPollRef.current);
+        }
+      } catch {
+        // retry next tick
       }
-    }, 1000);
-
-    // Authoritative path: write our own result to the database, then poll
-    // the room row until BOTH players' distances are present, and use
-    // those exact two numbers as the final, guaranteed-consistent result —
-    // this is what both devices ultimately agree on, regardless of whether
-    // any broadcast message got dropped along the way.
-    if (room?.id) {
-      let pollAttempts = 0;
-      reportFinish(room.id, isHostRef.current, finalDistance).catch(() => {
-        // If this write fails (e.g. transient network issue), the poll
-        // below will simply keep retrying the read side; we don't need
-        // special handling here.
-      });
-
-      reconcilePollRef.current = setInterval(async () => {
-        pollAttempts += 1;
-        try {
-          const r = await fetchRoom(room.id);
-          const mine = isHostRef.current ? r.player1_distance : r.player2_distance;
-          const theirs = isHostRef.current ? r.player2_distance : r.player1_distance;
-          if (mine !== null && theirs !== null) {
-            setMyResult(mine);
-            setOpponentResult(theirs);
-            setReconciled(true);
-            receivedAuthoritativeFinishRef.current = true;
-            if (reconcilePollRef.current) clearInterval(reconcilePollRef.current);
-            if (finishTimerRef.current) clearInterval(finishTimerRef.current);
-          }
-        } catch {
-          // keep retrying on the next tick
-        }
-        if (pollAttempts >= 25 && reconcilePollRef.current) {
-          // ~20s cap — if we still don't have both sides by now, something's
-          // wrong (opponent likely disconnected); stop polling rather than
-          // running forever. The estimated result stays on screen.
-          clearInterval(reconcilePollRef.current);
-        }
-      }, 800);
-    }
+      if (attempts >= 25 && resultsPollRef.current) {
+        // ~20s cap in case someone disconnected mid-race
+        setPhase("results");
+        setReconciling(false);
+        clearInterval(resultsPollRef.current);
+      }
+    }, 800);
+    setReconciling(true);
   };
 
-  // Stop resending once we've heard the opponent's REAL finish broadcast —
-  // not just our own estimate of it (see receivedAuthoritativeFinishRef
-  // comment above for why this distinction matters).
-  useEffect(() => {
-    if (receivedAuthoritativeFinishRef.current && finishTimerRef.current) {
-      clearInterval(finishTimerRef.current);
+  const handleRematch = async () => {
+    if (!isHost || !room) return;
+    try {
+      const newRoom = await createRematchRoom(room.duration_ms);
+      channelRef.current?.send({
+        type: "broadcast",
+        event: "rematch",
+        payload: { code: newRoom.code },
+      });
+      router.push(`/multiplayer/${newRoom.code}`);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to start rematch");
     }
-  }, [opponentResult]);
+  };
 
   if (error) {
     return (
       <main style={{ padding: 24, fontFamily: "system-ui" }}>
         <p style={{ color: "#cc3333" }}>{error}</p>
+        <p><Link href="/multiplayer">← Back to lobby</Link></p>
       </main>
     );
   }
 
-  if (!code) {
+  if (!room) {
     return (
       <main style={{ padding: 24, fontFamily: "system-ui" }}>
         <p>Loading room…</p>
@@ -259,49 +289,203 @@ export default function RacePage() {
     );
   }
 
-  if (!raceStartAt) {
+  // --- Waiting room ---
+  if (phase === "waiting") {
     return (
-      <main style={{ padding: 24, fontFamily: "system-ui" }}>
-        <h1>Waiting for opponent…</h1>
-        <p>
-          You're in as <strong>{playerNameRef.current}</strong>.
-        </p>
-        <p>
-          Share this code: <strong style={{ fontSize: 24, letterSpacing: 2 }}>{code}</strong>
-        </p>
-        {opponentPresent && <p style={{ color: "#0077cc" }}>Opponent connected — starting…</p>}
+      <main style={{ padding: 24, fontFamily: "system-ui", maxWidth: 480 }}>
+        <h1>Room {code}</h1>
+        <p style={{ color: "#666" }}>Share this code so others can join.</p>
+
+        <ul style={{ listStyle: "none", padding: 0, marginTop: 16 }}>
+          {players.map((p) => (
+            <li
+              key={p.playerId}
+              style={{
+                display: "flex",
+                justifyContent: "space-between",
+                padding: "8px 12px",
+                border: "1px solid #ddd",
+                borderRadius: 8,
+                marginBottom: 6,
+              }}
+            >
+              <span>
+                {p.playerName}
+                {p.playerId === room.host_id && " (host)"}
+                {p.playerId === playerIdRef.current && " — you"}
+              </span>
+              <span style={{ color: p.ready ? "#009966" : "#999" }}>
+                {p.ready ? "Ready" : "Not ready"}
+              </span>
+            </li>
+          ))}
+        </ul>
+
+        <button
+          onClick={toggleReady}
+          style={{
+            marginTop: 12,
+            width: "100%",
+            padding: "12px 0",
+            borderRadius: 8,
+            border: "1px solid #333",
+            background: myReady ? "#009966" : "#fff",
+            color: myReady ? "#fff" : "#333",
+            fontSize: 15,
+          }}
+        >
+          {myReady ? "Ready ✓ (tap to unready)" : "I'm Ready"}
+        </button>
+
+        {isHost && (
+          <button
+            onClick={handleStartRace}
+            disabled={!allReady}
+            style={{
+              marginTop: 12,
+              width: "100%",
+              padding: "12px 0",
+              borderRadius: 8,
+              border: "1px solid #333",
+              background: allReady ? "#333" : "#eee",
+              color: allReady ? "#fff" : "#999",
+              fontSize: 15,
+            }}
+          >
+            {players.length < 2
+              ? "Waiting for at least 2 players…"
+              : allReady
+              ? "Start Race"
+              : "Waiting for everyone to be ready…"}
+          </button>
+        )}
+        {!isHost && (
+          <p style={{ color: "#999", fontSize: 13, marginTop: 12 }}>
+            Waiting for the host to start the race once everyone's ready.
+          </p>
+        )}
       </main>
     );
   }
 
-  const bothFinished = myResult !== null && opponentResult !== null;
-  const iWon = bothFinished && myResult! > opponentResult!;
-  const tied = bothFinished && myResult === opponentResult;
+  // --- Countdown ---
+  if (phase === "countdown") {
+    return (
+      <main style={{ padding: 24, fontFamily: "system-ui", textAlign: "center" }}>
+        <h1 style={{ fontSize: 64 }}>{countdownLeft}</h1>
+        <p>Get ready…</p>
+        {isHost && (
+          <button
+            onClick={handleCancelCountdown}
+            style={{
+              marginTop: 16,
+              padding: "10px 20px",
+              borderRadius: 8,
+              border: "1px solid #cc3333",
+              background: "#fff",
+              color: "#cc3333",
+            }}
+          >
+            Cancel (e.g. to let another player join)
+          </button>
+        )}
+      </main>
+    );
+  }
+
+  // --- Racing ---
+  if (phase === "racing") {
+    return (
+      <main style={{ padding: 24, fontFamily: "system-ui" }}>
+        <h1>Race — Room {code}</h1>
+        <DinoCanvas
+          seed={room.seed}
+          durationMs={room.duration_ms}
+          raceStartAt={raceStartAt ?? Date.now()}
+          remoteStates={Object.values(remoteStates)}
+          localPlayerName={playerNameRef.current}
+          onLocalUpdate={handleLocalUpdate}
+          onFinish={handleFinish}
+        />
+        {myResult !== null && reconciling && (
+          <p style={{ color: "#999", fontSize: 13, marginTop: 12 }}>
+            Finished! Confirming everyone's final result…
+          </p>
+        )}
+      </main>
+    );
+  }
+
+  // --- Results ---
+  const sorted = [...results].sort((a, b) => b.distance - a.distance);
 
   return (
-    <main style={{ padding: 24, fontFamily: "system-ui" }}>
-      <h1>Race — Room {code}</h1>
+    <main style={{ padding: 24, fontFamily: "system-ui", maxWidth: 480 }}>
+      <h1>Results — Room {code}</h1>
+      <ol style={{ paddingLeft: 20, marginTop: 16 }}>
+        {sorted.map((r) => (
+          <li
+            key={r.player_id}
+            style={{
+              padding: "6px 0",
+              fontWeight: r.player_id === playerIdRef.current ? "bold" : "normal",
+            }}
+          >
+            {r.player_name}
+            {r.player_id === playerIdRef.current && " (you)"}: {Math.floor(r.distance)}m
+          </li>
+        ))}
+      </ol>
+      {sorted.length > 0 && <h2>{sorted[0].player_name} wins! 🎉</h2>}
 
-      <DinoCanvas
-        seed={room?.seed ?? 1}
-        durationMs={room?.duration_ms ?? 120_000}
-        raceStartAt={raceStartAt}
-        remoteState={remoteState}
-        localPlayerName={playerNameRef.current}
-        onLocalUpdate={handleLocalUpdate}
-        onFinish={handleFinish}
-      />
-
-      {myResult !== null && (
-        <div style={{ marginTop: 16 }}>
-          <p>{playerNameRef.current} (you): {Math.floor(myResult)}m</p>
-          <p>{opponentName}: {Math.floor(opponentResult ?? 0)}m</p>
-          <h2>{tied ? "It's a tie!" : iWon ? "You win! 🎉" : `${opponentName} wins`}</h2>
-          {!reconciled && (
-            <p style={{ color: "#999", fontSize: 13 }}>Confirming final result…</p>
-          )}
-        </div>
-      )}
+      <div style={{ display: "flex", gap: 8, marginTop: 24 }}>
+        {isHost ? (
+          <button
+            onClick={handleRematch}
+            style={{
+              flex: 1,
+              padding: "12px 0",
+              borderRadius: 8,
+              border: "1px solid #333",
+              background: "#333",
+              color: "#fff",
+              fontSize: 15,
+            }}
+          >
+            Rematch
+          </button>
+        ) : (
+          <button
+            disabled
+            style={{
+              flex: 1,
+              padding: "12px 0",
+              borderRadius: 8,
+              border: "1px solid #ddd",
+              background: "#f5f5f5",
+              color: "#999",
+              fontSize: 15,
+            }}
+          >
+            Waiting for host to rematch…
+          </button>
+        )}
+        <Link
+          href="/"
+          style={{
+            flex: 1,
+            padding: "12px 0",
+            borderRadius: 8,
+            border: "1px solid #333",
+            textAlign: "center",
+            textDecoration: "none",
+            color: "#333",
+            fontSize: 15,
+          }}
+        >
+          Home
+        </Link>
+      </div>
     </main>
   );
 }
