@@ -100,10 +100,17 @@ export default function RoomPage() {
     channel
       .on("presence", { event: "sync" }, () => {
         const state = channel.presenceState();
-        const list: PresenceInfo[] = Object.values(state)
+        const raw: PresenceInfo[] = Object.values(state)
           .flat()
           .map((p: any) => ({ playerId: p.playerId, playerName: p.playerName, ready: p.ready }));
-        setPlayers(list);
+
+        // Presence tracks CONNECTIONS, not people — if the same player has
+        // the site open in more than one tab, each tab is a separate
+        // connection and would otherwise show up as a duplicate "player".
+        // Dedupe by playerId, keeping the last entry seen for each.
+        const byId = new Map<string, PresenceInfo>();
+        for (const p of raw) byId.set(p.playerId, p);
+        setPlayers(Array.from(byId.values()));
       })
       .on("broadcast", { event: "countdown-start" }, ({ payload }) => {
         setCountdownEndsAt(payload.endsAt);
