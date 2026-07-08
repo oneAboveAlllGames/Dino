@@ -174,17 +174,18 @@ export default function RoomPage() {
   // Debounced: rapid tapping was firing a presence track() call on every
   // click with no limit, which could hit Supabase's realtime rate limit
   // and leave the channel briefly unresponsive. A short cooldown between
-  // toggles prevents that while still feeling instant for normal use.
-  const readyToggleCooldownRef = useRef(false);
+  // toggles prevents that while still feeling instant for normal use. The
+  // button is visibly disabled during the cooldown so it reads as "brief
+  // pause," not "broken" — and the cooldown always clears via try/finally,
+  // even if the network call itself fails, so a single bad request can't
+  // leave the button stuck forever.
+  const [readyToggling, setReadyToggling] = useState(false);
   const myPlayerEntry = players.find((p) => p.playerId === playerIdRef.current);
   const myReady = myPlayerEntry?.ready ?? false;
 
   const toggleReady = async () => {
-    if (readyToggleCooldownRef.current) return;
-    readyToggleCooldownRef.current = true;
-    setTimeout(() => {
-      readyToggleCooldownRef.current = false;
-    }, 400);
+    if (readyToggling) return;
+    setReadyToggling(true);
 
     const next = !myReady;
     const payload = {
@@ -193,17 +194,21 @@ export default function RoomPage() {
       ready: next,
     };
 
-    // track() can fail (e.g. transient network hiccup) without throwing in
-    // an obvious way — since we no longer keep a separate local "myReady"
-    // state, a failed track() now correctly leaves the button showing the
-    // OLD state rather than silently disagreeing with the actual room
-    // state, which was the root cause of the button/list mismatch. Retry
-    // once after a short delay if the first attempt didn't seem to land.
-    await channelRef.current?.track(payload);
+    try {
+      await channelRef.current?.track(payload);
+    } catch {
+      // swallow — the retry below covers it, and the finally block below
+      // guarantees the button re-enables regardless.
+    } finally {
+      setTimeout(() => setReadyToggling(false), 500);
+    }
+
+    // Retry once if the list still doesn't reflect the change shortly after —
+    // covers a track() call that resolved but didn't actually propagate.
     setTimeout(() => {
       const stillStale = players.find((p) => p.playerId === playerIdRef.current)?.ready !== next;
-      if (stillStale) channelRef.current?.track(payload);
-    }, 600);
+      if (stillStale) channelRef.current?.track(payload).catch(() => {});
+    }, 900);
   };
 
   const allReady = players.length >= 2 && players.every((p) => p.ready);
@@ -352,6 +357,7 @@ export default function RoomPage() {
 
         <button
           onClick={toggleReady}
+          disabled={readyToggling}
           style={{
             marginTop: 12,
             width: "100%",
@@ -361,9 +367,10 @@ export default function RoomPage() {
             background: myReady ? "#009966" : "#fff",
             color: myReady ? "#fff" : "#333",
             fontSize: 15,
+            opacity: readyToggling ? 0.6 : 1,
           }}
         >
-          {myReady ? "Ready ✓ (tap to unready)" : "I'm Ready"}
+          {readyToggling ? "…" : myReady ? "Ready ✓ (tap to unready)" : "I'm Ready"}
         </button>
 
         {isHost && (
