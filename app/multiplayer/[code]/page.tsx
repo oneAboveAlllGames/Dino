@@ -133,6 +133,15 @@ export default function RacePage() {
     };
   }, [code]);
 
+  // Throttle outgoing broadcasts to ~10/sec. The game loop calls this every
+  // animation frame (~60/sec), but Supabase Realtime rate-limits broadcast
+  // messages (commonly ~10/sec/client on the free tier) — sending 60/sec
+  // meant most messages were silently dropped, and each device ended up
+  // showing a different, stale snapshot of the opponent. This is very
+  // likely what caused the mismatched in-race numbers.
+  const lastSentAtRef = useRef(0);
+  const SEND_INTERVAL_MS = 100; // 10 times/sec
+
   const handleLocalUpdate = (state: {
     distance: number;
     y: number;
@@ -140,6 +149,10 @@ export default function RacePage() {
     isStumbling: boolean;
     isBoosted: boolean;
   }) => {
+    const now = Date.now();
+    if (now - lastSentAtRef.current < SEND_INTERVAL_MS) return;
+    lastSentAtRef.current = now;
+
     channelRef.current?.send({
       type: "broadcast",
       event: "state",
@@ -152,7 +165,7 @@ export default function RacePage() {
         isStumbling: state.isStumbling,
         isBoosted: state.isBoosted,
         finished: false,
-        updatedAt: Date.now(),
+        updatedAt: now,
       },
     });
   };
