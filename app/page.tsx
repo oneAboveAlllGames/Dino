@@ -10,6 +10,9 @@ export default function Home() {
       <p>
         <Link href="/multiplayer">Play online multiplayer →</Link>
       </p>
+      <p>
+        <Link href="/singleplayer">Play Endless Mode (solo, high scores) →</Link>
+      </p>
     </main>
   );
 }

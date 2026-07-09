@@ -28,6 +28,7 @@ interface DinoCanvasProps {
   distanceGoal?: number; // px distance to finish line (used if durationMs not set)
   durationMs?: number; // if set, race runs for this long instead of to a distance goal
   raceStartAt?: number; // shared epoch ms timestamp both players count down from (for sync)
+  endless?: boolean; // endless survival mode: instant death, time-based speed ramp, no timer/goal
   keymap?: { jump: string[]; duck: string[] }; // for split-screen: differing keys per player
   remoteStates?: RemotePlayerState[];
   localPlayerName?: string;
@@ -67,6 +68,7 @@ export default function DinoCanvas({
   distanceGoal,
   durationMs,
   raceStartAt,
+  endless = false,
   keymap = DEFAULT_KEYMAP,
   remoteStates = [],
   localPlayerName = "You",
@@ -83,6 +85,7 @@ export default function DinoCanvas({
       seed,
       raceDurationMs,
       boostCount: boostCountForDuration(raceDurationMs),
+      endless,
     })
   );
   const inputRef = useRef<InputState>({ jumpPressed: false, duckPressed: false });
@@ -145,6 +148,7 @@ export default function DinoCanvas({
       seed,
       raceDurationMs,
       boostCount: boostCountForDuration(raceDurationMs),
+      endless,
     };
 
     const loop = (ts: number) => {
@@ -169,7 +173,13 @@ export default function DinoCanvas({
           isBoosted: engineRef.current.dino.isBoosted,
         });
 
-        if (durationMs) {
+        if (endless) {
+          if (engineRef.current.dino.dead) {
+            finishedRef.current = true;
+            onFinish?.(engineRef.current.dino.distance);
+            forceRender((n) => n + 1);
+          }
+        } else if (durationMs) {
           const elapsed = performance.timeOrigin + ts - startAtRef.current;
           const remaining = Math.max(0, durationMs - elapsed);
           setTimeLeftMs(remaining);
@@ -192,7 +202,7 @@ export default function DinoCanvas({
     rafRef.current = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(rafRef.current);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [seed, distanceGoal, durationMs, raceStartAt, width, height, localPlayerName]);
+  }, [seed, distanceGoal, durationMs, raceStartAt, endless, width, height, localPlayerName]);
 
   return (
     <div>
@@ -430,6 +440,20 @@ function draw(
     ctx.fillStyle = OPPONENT_COLORS[i % OPPONENT_COLORS.length];
     ctx.fillText(`${Math.floor(remote.distance)}m`, width - 90, 20 + (i + 1) * 18);
   });
+
+  // Endless mode: game over overlay on death
+  if (engine.dino.dead) {
+    ctx.fillStyle = "rgba(255,255,255,0.85)";
+    ctx.fillRect(0, height / 2 - 40, width, 80);
+    ctx.fillStyle = "#cc3333";
+    ctx.font = "bold 28px sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText("Game Over", width / 2, height / 2 - 4);
+    ctx.fillStyle = "#333";
+    ctx.font = "16px monospace";
+    ctx.fillText(`${Math.floor(engine.dino.distance)}m`, width / 2, height / 2 + 22);
+    ctx.textAlign = "start";
+  }
 }
 
 function drawNameLabel(

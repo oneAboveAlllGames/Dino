@@ -35,6 +35,7 @@ export interface DinoState {
   boostEndsAt: number | null;
   distance: number;     // total distance traveled (score)
   speed: number;         // current forward speed (px/frame at 60fps baseline)
+  dead: boolean;         // endless mode only — true the instant an obstacle is hit, run over
 }
 
 export interface GameConfig {
@@ -59,6 +60,14 @@ export interface GameConfig {
   // distance-based spawn interval.
   boostCount: number;
   raceDurationMs: number;
+  // Endless survival mode: obstacles kill instantly (no stumble/pass-through),
+  // speed increases in fixed steps every speedStepMs instead of ramping
+  // smoothly with distance, and boosts spawn on a repeating timer instead
+  // of a fixed pre-race schedule (since there's no fixed race length).
+  endless: boolean;
+  speedStepMs: number;
+  speedStepIncrement: number;
+  boostRepeatMs: number;
 }
 
 export interface RemotePlayerState {

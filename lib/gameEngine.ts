@@ -31,6 +31,10 @@ export const DEFAULT_CONFIG: GameConfig = {
   obstacleMaxGapPx: 600,
   boostCount: 6,
   raceDurationMs: 90_000,
+  endless: false,
+  speedStepMs: 30_000,
+  speedStepIncrement: 1.5,
+  boostRepeatMs: 20_000,
 };
 
 // --- Seeded RNG (mulberry32) ---------------------------------------------
@@ -60,6 +64,7 @@ export function createInitialDinoState(): DinoState {
     boostEndsAt: null,
     distance: 0,
     speed: DEFAULT_CONFIG.baseSpeed,
+    dead: false,
   };
 }
 
@@ -123,6 +128,13 @@ export function updateEngine(
   dtMs: number,
   now: number
 ): EngineState {
+  // Endless mode: once dead, the run is over — freeze everything exactly
+  // where it was so the final frame stays visible instead of continuing
+  // to animate past a "dead" dino.
+  if (config.endless && state.dino.dead) {
+    return state;
+  }
+
   const dino = { ...state.dino };
   const dt = dtMs / (1000 / 60); // normalize to 60fps "frames"
 
@@ -138,11 +150,15 @@ export function updateEngine(
     dino.boostEndsAt = null;
   }
 
-  // --- Speed ramps up gradually with distance, boosted while boost active ---
-  const rampedSpeed = Math.min(
-    config.baseSpeed + dino.distance / 2000,
-    config.maxSpeed
-  );
+  // --- Speed: endless mode steps up every fixed interval of TIME (starts
+  // slow/easy, gets harder the longer you survive); race mode ramps
+  // smoothly with DISTANCE instead. Boosted multiplies whichever applies. ---
+  const rampedSpeed = config.endless
+    ? Math.min(
+        config.baseSpeed + Math.floor(state.elapsedMs / config.speedStepMs) * config.speedStepIncrement,
+        config.maxSpeed
+      )
+    : Math.min(config.baseSpeed + dino.distance / 2000, config.maxSpeed);
   dino.speed = dino.isBoosted ? rampedSpeed * config.boostMultiplier : rampedSpeed;
 
   // Stumbling dinos don't move forward and can't jump/duck
@@ -212,34 +228,53 @@ export function updateEngine(
     nextObstacleAt = worldX + gap;
   }
 
-  // --- Spawn power-ups on the precomputed even-spacing time schedule ---
-  // (fixed count for the whole race — e.g. 6 for a 1.5min race, 10 for 2min,
-  // 15 for 3min — rather than randomly by distance travelled).
+  // --- Spawn power-ups ---
+  // Race mode: fixed count spread evenly across the whole race (precomputed
+  // schedule). Endless mode: no fixed race length, so instead spawn one
+  // every `boostRepeatMs` on a simple repeating timer.
   let nextBoostScheduleIndex = state.nextBoostScheduleIndex;
-  while (
-    nextBoostScheduleIndex < state.boostSpawnSchedule.length &&
-    elapsedMs >= state.boostSpawnSchedule[nextBoostScheduleIndex]
-  ) {
-    powerUps = [
-      ...powerUps,
-      {
-        id: nextPowerUpId,
-        x: 900,
-        y: -70, // floating above ground, jump-height reachable
-        width: 34,
-        height: 34,
-        collected: false,
-      },
-    ];
-    nextPowerUpId += 1;
-    nextBoostScheduleIndex += 1;
+  if (config.endless) {
+    if (elapsedMs >= nextBoostScheduleIndex * config.boostRepeatMs + config.boostRepeatMs) {
+      powerUps = [
+        ...powerUps,
+        { id: nextPowerUpId, x: 900, y: -70, width: 34, height: 34, collected: false },
+      ];
+      nextPowerUpId += 1;
+      nextBoostScheduleIndex += 1;
+    }
+  } else {
+    while (
+      nextBoostScheduleIndex < state.boostSpawnSchedule.length &&
+      elapsedMs >= state.boostSpawnSchedule[nextBoostScheduleIndex]
+    ) {
+      powerUps = [
+        ...powerUps,
+        {
+          id: nextPowerUpId,
+          x: 900,
+          y: -70, // floating above ground, jump-height reachable
+          width: 34,
+          height: 34,
+          collected: false,
+        },
+      ];
+      nextPowerUpId += 1;
+      nextBoostScheduleIndex += 1;
+    }
   }
 
-  // --- Collision: obstacles -> stumble ---
-  // Once an obstacle has hit the player, it's marked `hit` and passed through
-  // for the rest of its lifetime — it can never stumble the player a second
-  // time, even though it keeps scrolling past at the same position.
-  if (!dino.isStumbling) {
+  // --- Collision: obstacles ---
+  // Race mode: stumble + pass-through (existing behavior, unchanged).
+  // Endless mode: instant death on first touch, no grace, no pass-through —
+  // the run ends immediately.
+  if (config.endless) {
+    for (const o of obstacles) {
+      if (!o.hit && checkDinoCollision(dino, o, config)) {
+        dino.dead = true;
+        break;
+      }
+    }
+  } else if (!dino.isStumbling) {
     obstacles = obstacles.map((o) => {
       if (!o.hit && checkDinoCollision(dino, o, config)) {
         dino.isStumbling = true;
